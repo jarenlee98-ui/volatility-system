@@ -1,0 +1,1032 @@
+import streamlit as st
+import pandas as pd
+import os
+import json
+import re
+import datetime
+import requests
+from supabase_store import (
+    load_watchlist, save_watchlist,
+    load_upcoming_events, save_upcoming_events,
+    IS_CLOUD
+)
+
+try:
+    from volatility_system import EventDrivenVolatilitySystem, CatalystDatabase, EventParser, PredictiveEngine, CatalystRecord, LiveDataFetcher
+except ImportError:
+    from volatility_system import EventDrivenVolatilitySystem, CatalystDatabase, EventParser, PredictiveEngine, CatalystRecord, LiveDataFetcher
+
+st.set_page_config(
+    page_title="Event-Driven Volatility Predictive System",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+WATCHLIST_FILE = "watchlist.json"
+EVENTS_FILE = "upcoming_events.json"
+DB_FILE_PATH = "Catalyst_Correlations.md"
+
+if "db_path" not in st.session_state:
+    st.session_state.db_path = DB_FILE_PATH
+
+if "system" not in st.session_state:
+    st.session_state.system = EventDrivenVolatilitySystem(db_path=st.session_state.db_path)
+
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
+
+if "upcoming_events" not in st.session_state:
+    st.session_state.upcoming_events = load_upcoming_events()
+
+system = st.session_state.system
+
+st.markdown("""
+<style>
+    .reportview-container { background: #0e1117; }
+    .metric-card { background-color: #1f2937; padding: 20px; border-radius: 10px; border: 1px solid #374151; margin-bottom: 15px; }
+    .metric-title { color: #9ca3af; font-size: 0.85rem; text-transform: uppercase; font-weight: bold; margin-bottom: 5px; }
+    .metric-value { font-size: 1.8rem; font-weight: bold; color: #34d399; }
+    .metric-value-down { font-size: 1.8rem; font-weight: bold; color: #f87171; }
+    .directive-card { background-color: #1e3a8a; padding: 15px; border-radius: 8px; border-left: 5px solid #3b82f6; margin-bottom: 15px; }
+    .actionable-card { background-color: #064e3b; padding: 15px; border-radius: 8px; border-left: 5px solid #10b981; margin-bottom: 15px; }
+</style>
+""", unsafe_allow_html=True)
+
+st.sidebar.title("📈 Volatility Dashboard")
+st.sidebar.subheader("Watchlist Manager")
+
+watchlist_str = st.sidebar.text_area(
+    "Active Watchlist Tickers", 
+    value=", ".join(st.session_state.watchlist),
+    help="Add or remove tickers (comma separated, e.g. NOW, MSFT, AAPL)."
+)
+
+if st.sidebar.button("Save Watchlist Tickers"):
+    updated_watchlist = [t.strip().upper() for t in watchlist_str.split(",") if t.strip()]
+    st.session_state.watchlist = updated_watchlist
+    save_watchlist(updated_watchlist)
+    st.sidebar.success("Watchlist saved successfully!")
+    st.rerun()
+
+st.sidebar.subheader("Configuration")
+db_file = st.sidebar.text_input("Database File Path", value=st.session_state.db_path)
+if db_file != st.session_state.db_path:
+    st.session_state.db_path = db_file
+    st.session_state.system = EventDrivenVolatilitySystem(db_path=db_file)
+    st.rerun()
+
+st.sidebar.info("""
+**System Architecture:**
+This system implements a transition from continuous mathematical volatility models to **discrete event classification**. It matches real-time headlines against a historical correlation database to capture high-probability arbitrage windows.
+""")
+
+st.title("Event-Driven Volatility Correlation & Predictive Alert System")
+st.caption("Discrete Event Classification & Quantitative Arbitrage Matching Engine")
+
+tab_predict, tab_schedule, tab_database, tab_memory = st.tabs([
+    "🎯 Real-Time Prediction Engine", 
+    "📅 Scheduler & Watchlist", 
+    "🗄️ Correlation Database Editor",
+    "🧠 Memory Bank"
+])
+
+# ==========================================
+# TAB 1: REAL-TIME PREDICTION ENGINE
+# ==========================================
+with tab_predict:
+    st.subheader("Process Real-Time Catalyst (Phases 2 & 3)")
+    st.write("Input the raw news drop or press release headline along with the stock's current price to generate an instant volatility forecast.")
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        raw_news = st.text_area(
+            "Raw Headline / Ingestion Press Release",
+            value="NOW Q2 Earnings: Revenue $3.92B (+22% YoY), EPS $0.85 (Beat by $0.09). Forward guidance raised by 4%.",
+            height=120
+        )
+
+    with col2:
+        ref_price = st.number_input("Reference Entry Price ($)", value=111.15, step=1.0, format="%.2f")
+        predict_btn = st.button("Calculate Volatility Projection", type="primary", use_container_width=True)
+
+    if raw_news or predict_btn:
+        st.markdown("---")
+        parsed_data = EventParser.parse_data_drop(raw_news)
+        ticker = parsed_data.get("ticker", "UNKNOWN")
+        prediction = system.engine.generate_prediction(parsed_data, ref_price)
+        
+        st.subheader(f"PRE-MARKET CATALYST ALERT: **{ticker}**")
+        
+        m_col1, m_col2, m_col3 = st.columns(3)
+        with m_col1:
+            is_down = "down" in prediction["net_predicted_swing"].lower() or "-" in prediction["net_predicted_swing"]
+            v_class = "metric-value-down" if is_down else "metric-value"
+            st.markdown(f'<div class="metric-card"><div class="metric-title">Forecasted Price Swing</div><div class="{v_class}">{prediction["net_predicted_swing"]}</div></div>', unsafe_allow_html=True)
+            
+        with m_col2:
+            st.markdown(f'<div class="metric-card"><div class="metric-title">Projected Opening Price</div><div class="metric-value" style="color: #60a5fa;">{prediction["projected_open"]}</div></div>', unsafe_allow_html=True)
+            
+        with m_col3:
+            st.markdown(f'<div class="metric-card"><div class="metric-title">Pre-Catalyst Entry</div><div class="metric-value" style="color: #9ca3af;">${ref_price:.2f}</div></div>', unsafe_allow_html=True)
+
+        st.markdown("### Catalyst Ingestion Breakdown")
+        if prediction["table_rows"]:
+            df_rows = pd.DataFrame(prediction["table_rows"])
+            df_rows.columns = ["Metric", "Reported Data", "Historical Correlation Match", "Predicted Open Impact"]
+            st.dataframe(df_rows, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No structured catalyst metrics were extracted from the headline.")
+
+        st.markdown("### Actionable Quantitative Playbook")
+        st.markdown(f'<div class="directive-card"><h4 style="margin:0 0 5px 0; color:#93c5fd;">📋 System Directive</h4><p style="margin:0; font-size:0.95rem;">{prediction["system_directive"]}</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="actionable-card"><h4 style="margin:0 0 5px 0; color:#a7f3d0;">⚡ Actionable Read (Arbitrage Window)</h4><p style="margin:0; font-size:0.95rem;">{prediction["actionable_read"]}</p></div>', unsafe_allow_html=True)
+
+        st.markdown("### 🤖 Performance Verification & Auto-Save")
+        col_verify, col_status = st.columns([1, 2])
+        with col_verify:
+            verify_btn = st.button("Check Market Close & Auto-Log", type="secondary", use_container_width=True)
+            
+        with col_status:
+            if verify_btn:
+                if ticker == "UNKNOWN":
+                    st.error("Cannot perform a market price check for an 'UNKNOWN' ticker.")
+                else:
+                    with st.spinner(f"Querying market close data for {ticker}..."):
+                        log_res = system.check_and_auto_log_market_swing(ticker, ref_price, raw_news)
+                        if log_res["logged"]:
+                            st.success(log_res["message"])
+                            system.db.load_from_markdown()
+                        else:
+                            st.info(log_res["message"])
+
+# ==========================================
+# TAB 2: SCHEDULER & WATCHLIST
+# ==========================================
+with tab_schedule:
+    st.subheader("Event Scheduler & Calendar Automation (Phase 1)")
+    col_sync1, col_sync2 = st.columns([1, 3])
+    with col_sync1:
+        sync_calendar = st.button("Sync Watchlist with Yahoo Finance 🌐", type="primary", use_container_width=True)
+    with col_sync2:
+        st.write("Clicking sync will fetch the live next-scheduled earnings and dividend dates.")
+
+    if sync_calendar:
+        updated_events = []
+        progress_bar = st.progress(0, text="Syncing with Yahoo Finance. Please wait...")
+        tickers = st.session_state.watchlist
+        total_tickers = len(tickers)
+        
+        if total_tickers == 0:
+            st.warning("Your Watchlist is empty. Add tickers in the Sidebar first!")
+        else:
+            for i, ticker in enumerate(tickers):
+                progress_bar.progress((i + 1) / total_tickers, text=f"Querying live metadata for {ticker} ({i+1}/{total_tickers})...")
+                live_data = LiveDataFetcher.fetch_upcoming_events(ticker)
+                
+                if live_data["earnings_date"] != "No Data Found" and "Failed" not in live_data["earnings_date"]:
+                    updated_events.append({"ticker": ticker, "event_type": "Earnings", "timing": live_data["earnings_date"]})
+                if live_data["ex_dividend_date"] != "No Data Found" and "Failed" not in live_data["ex_dividend_date"]:
+                    updated_events.append({"ticker": ticker, "event_type": "Ex-Dividend", "timing": live_data["ex_dividend_date"]})
+            
+            progress_bar.empty()
+            st.session_state.upcoming_events = updated_events
+            save_upcoming_events(updated_events)
+            st.success(f"Calendar successfully synced! Logged {len(updated_events)} upcoming catalyst events.")
+
+    st.markdown("### 📅 Pre-Scheduled Upcoming Events Grid")
+    if st.session_state.upcoming_events:
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        future_events = [
+            e for e in st.session_state.upcoming_events
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", str(e.get("timing", "")))
+            and str(e.get("timing", "")) >= today_str
+        ]
+        if future_events:
+            sorted_events = sorted(future_events, key=lambda x: x.get("timing", "9999-12-31"))
+            df_watch = pd.DataFrame(sorted_events)
+            df_watch.columns = ["Ticker Symbol", "Event Type", "Scheduled Date"]
+            st.dataframe(df_watch, use_container_width=True, hide_index=True)
+            st.caption(f"Showing {len(future_events)} upcoming event(s). Past dates are automatically hidden.")
+        else:
+            st.info("No upcoming events — all scheduled dates have passed. Sync with Yahoo Finance to refresh.")
+        if st.button("Reset Calendar Schedule"):
+            st.session_state.upcoming_events = []
+            save_upcoming_events([])
+            st.rerun()
+    else:
+        st.info("No pre-scheduled dates currently loaded.")
+
+# ==========================================
+# TAB 3: HISTORICAL CORRELATION DATABASE
+# ==========================================
+with tab_database:
+    st.subheader("🗄️ Historical Correlation Database")
+    st.write("This database acts as the system's baseline ground-truth. You can view, add, or edit historical event-driven triggers.")
+
+    system.db.load_from_markdown()
+    records_list = [{"Ticker": r.ticker, "Event Type": r.event_type, "Trigger Metric": r.trigger_metric, "Resulting Swing": r.resulting_swing, "Classification": r.classification, "Swing Value (%)": r.swing_value} for r in system.db.records]
+    st.dataframe(pd.DataFrame(records_list), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.info(
+        "**⚡ Want to log a new historical event?**\n\n"
+        "Use the **🧠 Memory Bank** tab — it runs the same yfinance price fetch, "
+        "then sends the news to Gemini for multi-catalyst classification with weighted swing attribution, "
+        "before saving to this database.\n\n"
+        "The old single-catalyst pipeline here has been retired in favour of that richer workflow.",
+        icon="👆"
+    )
+    st.markdown("---")
+    with st.expander("✍️ Manual Data Entry Override"):
+        with st.form("add_record_form"):
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                new_ticker = st.text_input("Ticker", placeholder="AAPL").upper()
+                new_event = st.text_input("Event Type", placeholder="Earnings / Product Launch")
+            with col_f2:
+                new_trigger = st.text_input("Specific Trigger Metric", placeholder="Beat Revenue estimates by 15%")
+                new_swing_str = st.text_input("Resulting Price Swing String", placeholder="+12.45% (1 Day)")
+            with col_f3:
+                new_class = st.selectbox("Catalyst Classification", ["Forward Guidance Hike", "Structural Short Squeeze", "Hyper-Specific Narrative Validation", "Sector Sympathy Rally", "Supply Chain Failure", "Dividend Suspension / Capital Flight", "Earnings Beat", "Earnings Miss", "Earnings Beat / Product Hype"])
+                new_swing_val = st.number_input("Numeric Price Swing (%)", value=0.0, step=0.1)
+
+            submit_record = st.form_submit_button("Force Manual Record Override")
+            
+            if submit_record:
+                if new_ticker and new_event and new_trigger:
+                    new_record = CatalystRecord(ticker=new_ticker, event_type=new_event, trigger_metric=new_trigger, resulting_swing=new_swing_str if new_swing_str else f"{new_swing_val:+.2f}% (1 Day)", classification=new_class, swing_value=new_swing_val)
+                    system.db.add_record(new_record)
+                    system.db.save()
+                    st.success(f"Successfully added {new_ticker} manually!")
+                    st.rerun()
+                else:
+                    st.error("Please fill out all required fields.")
+# ==========================================
+# TAB 4: MEMORY BANK
+# ==========================================
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+def _classify_catalyst_with_gemini(ticker: str, swing_pct: float, days: int, news_text: str) -> list:
+    """
+    Sends the price swing + raw news to Gemini and returns a LIST of classification dicts,
+    one per distinct catalyst present in the news. Ranked by impact (primary first).
+    Each dict: {event_type, trigger_metric, classification, confidence, rationale, rank}
+    Falls back to rule-based extraction if the API call fails.
+    """
+    prompt = f"""You are a quantitative event-driven analyst. A stock ({ticker}) moved {swing_pct:+.2f}% over {days} trading day(s).
+
+The following catalyst news caused that move:
+---
+{news_text}
+---
+
+A single price event can be driven by MULTIPLE distinct catalysts simultaneously. Identify ALL catalysts present and estimate how much of the total price move each one was responsible for.
+
+Return ONLY a valid JSON array (no markdown fences, no preamble). Each element represents one distinct catalyst, ranked by impact (most impactful first):
+
+[
+  {{
+    "rank": 1,
+    "weight_pct": 45,
+    "event_type": "<one of: Earnings / Catalyst | Macro / Sector | Clinical Data / Regulatory | Corporate Action | Guidance Cut>",
+    "trigger_metric": "<concise 1-2 sentence description of THIS SPECIFIC catalyst. Include numbers where present.>",
+    "classification": "<one of: Forward Guidance Hike | Structural Short Squeeze | Hyper-Specific Narrative Validation | Sector Sympathy Rally | Supply Chain Failure | Dividend Suspension / Capital Flight | Earnings Beat | Earnings Miss | Earnings Beat / Product Hype | Binary Pipeline Success | Mega-Contract Visibility | EBITDA Inflection | Sector Macro Tailwind>",
+    "confidence": "<High | Medium | Low>",
+    "rationale": "<1 sentence explaining why this specific catalyst drove the move>"
+  }}
+]
+
+Rules:
+- Include between 1 and 5 catalysts. Only include real, distinct drivers — do not pad.
+- Each catalyst must have a different classification.
+- The primary (rank 1) catalyst is the single biggest driver of the move.
+- If only one catalyst is present, return an array with one element.
+- weight_pct is an integer (0–100) representing each catalyst's estimated share of the total price swing. All weight_pct values MUST sum to exactly 100."""
+
+    try:
+        # Resolve API key: Streamlit secrets → environment variable
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        try:
+            api_key = st.secrets.get("GEMINI_API_KEY", "") or api_key
+        except Exception:
+            pass  # No secrets.toml — fall back to env var (or empty)
+        if not api_key:
+            raise ValueError(
+                "No Gemini API key found. Add GEMINI_API_KEY to your "
+                ".streamlit/secrets.toml or as an environment variable."
+            )
+
+        # Gemini REST endpoint — gemini-2.0-flash is free-tier eligible
+        gemini_url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-3.5-flash:generateContent?key={api_key}"
+        )
+        resp = requests.post(
+            gemini_url,
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.2}
+            },
+            timeout=25
+        )
+        resp.raise_for_status()
+        raw_resp = resp.json()
+        if not raw_resp.get("candidates"):
+            raise ValueError(f"Gemini returned no candidates: {raw_resp}")
+        raw = raw_resp["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = re.sub(r"```json|```", "", raw).strip()
+        if not raw.endswith("]"):
+            raw = raw[:raw.rfind("}") + 1] + "]"
+        result = json.loads(raw)
+        # Ensure it's always a list
+        if isinstance(result, dict):
+            result = [result]
+        # Ensure rank field exists
+        for i, item in enumerate(result):
+            if "rank" not in item:
+                item["rank"] = i + 1
+        result = sorted(result, key=lambda x: x.get("rank", 99))
+
+        # Normalise weights so they always sum to 100, then attach weighted swing
+        total_w = sum(item.get("weight_pct", 0) for item in result)
+        if total_w == 0:
+            # Fallback: equal weighting when Gemini omitted weights
+            equal = round(100 / len(result))
+            for item in result:
+                item["weight_pct"] = equal
+            total_w = equal * len(result)
+        for item in result:
+            w = item.get("weight_pct", 0)
+            # Normalise to true 100 in case of rounding drift
+            normalised_w = w / total_w * 100
+            item["weight_pct"] = round(normalised_w)
+            item["weighted_swing"] = round(swing_pct * normalised_w / 100, 2)
+
+        # Fix any rounding residual so the displayed weights sum cleanly to 100
+        diff = 100 - sum(item["weight_pct"] for item in result)
+        if diff != 0:
+            result[0]["weight_pct"] += diff  # absorb residual into primary catalyst
+
+        return result
+    except Exception as e:
+        # Rule-based fallback — returns a list with one item
+        parsed = EventParser.parse_data_drop(news_text)
+        metrics = parsed.get("metrics", {})
+        parts = []
+        if "revenue" in metrics:
+            parts.append(f"Rev {metrics['revenue'].get('amount','')} ({metrics['revenue'].get('change','Beat')})")
+        if "eps" in metrics:
+            parts.append(f"EPS {metrics['eps'].get('amount','')} ({metrics['eps'].get('beat','Beat')})")
+        if "guidance" in metrics:
+            parts.append(f"Guidance {metrics['guidance'].get('action','')} by {metrics['guidance'].get('amount','')}")
+        trigger = " AND ".join(parts) if parts else "Event-Driven Release"
+
+        if "guidance" in metrics and metrics["guidance"].get("action") == "raised":
+            cls = "Forward Guidance Hike"
+        elif "guidance" in metrics and metrics["guidance"].get("action") == "lowered":
+            cls = "Supply Chain Failure" if "supply" in news_text.lower() else "Guidance Cut"
+        elif "narrative" in metrics:
+            cls = metrics["narrative"]
+        else:
+            cls = "Earnings Beat" if swing_pct >= 0 else "Earnings Miss"
+
+        return [{
+            "rank": 1,
+            "weight_pct": 100,
+            "weighted_swing": round(swing_pct, 2),
+            "event_type": "Earnings / Catalyst",
+            "trigger_metric": trigger,
+            "classification": cls,
+            "confidence": "Low",
+            "rationale": f"Rule-based fallback (Gemini API error: {e})"
+        }]
+
+
+def _score_watchlist_matches(new_classification: str, new_swing_val: float, new_trigger: str) -> list:
+    """
+    Scans upcoming_events against the DB for pattern-matched alert candidates.
+    Returns a list of dicts {ticker, event_type, timing, match_reason, alert_level}.
+    """
+    alerts = []
+    upcoming = st.session_state.upcoming_events
+    db_records = system.db.records
+
+    explosive_classes = {
+        "Forward Guidance Hike", "Structural Short Squeeze",
+        "Hyper-Specific Narrative Validation", "Sector Sympathy Rally"
+    }
+    is_explosive = new_classification in explosive_classes
+    trigger_lower = new_trigger.lower()
+
+    ai_infra_keywords = ["gpu", "ai infrastructure", "data center", "hpc", "hyperscaler", "computing capacity"]
+    guidance_keywords = ["guidance raised", "outlook raised", "raised guidance", "targets raised"]
+    revenue_5x_keywords = ["5x", "multiplied", "5-fold", "quintupled", "500%"]
+    ebitda_positive_keywords = ["ebitda", "positive", "profitability", "margin"]
+    contract_keywords = ["billion", "contract", "deal", "visibility", "backlog"]
+
+    for evt in upcoming:
+        ticker = evt.get("ticker", "")
+        event_type = evt.get("event_type", "")
+        timing = evt.get("timing", "")
+
+        # Only flag upcoming Earnings events for catalyst pattern matching
+        if event_type != "Earnings":
+            continue
+
+        reasons = []
+        alert_level = None
+
+        # Check if any same-ticker historical record shares the classification
+        ticker_history = [r for r in db_records if r.ticker == ticker]
+        for r in ticker_history:
+            if r.classification == new_classification:
+                reasons.append(f"Ticker has prior {new_classification} event ({r.resulting_swing})")
+
+        # Sector sympathy: AI infra keywords present → flag AI-adjacent tickers
+        if is_explosive and any(kw in trigger_lower for kw in ai_infra_keywords):
+            ai_adjacent = {"NVDA", "MRVL", "MSFT", "GOOG", "META", "AMZN", "CRWV", "SMCI", "NBIS", "NOW", "IREN"}
+            if ticker in ai_adjacent:
+                reasons.append("AI-infrastructure sector sympathy candidate")
+
+        # Guidance raise pattern match
+        if new_classification == "Forward Guidance Hike" and any(kw in trigger_lower for kw in guidance_keywords):
+            reasons.append("Pattern match: Forward Guidance Hike — historically triggers gap-up >12%")
+
+        # Hypergrowth revenue match (5x or extreme YoY)
+        if any(kw in trigger_lower for kw in revenue_5x_keywords):
+            reasons.append("Hyper-growth revenue signal (>5x YoY) — rare catalyst with explosive precedent")
+
+        # EBITDA inflection
+        if all(kw in trigger_lower for kw in ["ebitda"]) and any(kw in trigger_lower for kw in ebitda_positive_keywords):
+            reasons.append("EBITDA inflection to positive — monetisation proof catalyst")
+
+        # Mega-contract visibility
+        if any(kw in trigger_lower for kw in contract_keywords) and "billion" in trigger_lower:
+            reasons.append("Multi-billion contract visibility — backlog-driven re-rating catalyst")
+
+        if not reasons:
+            continue
+
+        # Assign alert level
+        if len(reasons) >= 3 or abs(new_swing_val) >= 30:
+            alert_level = "🔴 HIGH"
+        elif len(reasons) >= 2 or abs(new_swing_val) >= 15:
+            alert_level = "🟡 MEDIUM"
+        else:
+            alert_level = "🟢 WATCH"
+
+        alerts.append({
+            "ticker": ticker,
+            "event_type": event_type,
+            "timing": timing,
+            "match_reasons": reasons,
+            "alert_level": alert_level
+        })
+
+    # Deduplicate by ticker, keeping highest severity
+    seen = {}
+    priority = {"🔴 HIGH": 3, "🟡 MEDIUM": 2, "🟢 WATCH": 1}
+    for a in alerts:
+        t = a["ticker"]
+        if t not in seen or priority[a["alert_level"]] > priority[seen[t]["alert_level"]]:
+            seen[t] = a
+
+    return sorted(seen.values(), key=lambda x: priority[x["alert_level"]], reverse=True)
+
+
+def _scan_for_rule_candidates() -> list:
+    """
+    After every save, scans the full DB for classifications where:
+      - 3+ records ALL produced an absolute swing >= 15% (either direction)
+      - The classification is NOT already a known system rule
+    Returns list of dicts: {classification, record_count, avg_swing, examples, direction}
+    """
+    KNOWN_RULES = {
+        "Forward Guidance Hike",
+        "Structural Short Squeeze",
+        "Hyper-Specific Narrative Validation",
+    }
+
+    # Load dismissed suggestions from session state so they stay gone
+    dismissed = st.session_state.get("mb_dismissed_rules", set())
+
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    for r in system.db.records:
+        if abs(r.swing_value) >= 15.0:
+            buckets[r.classification].append(r)
+
+    candidates = []
+    for cls, records in buckets.items():
+        if len(records) < 3:
+            continue
+        if cls in KNOWN_RULES:
+            continue
+        if cls in dismissed:
+            continue
+
+        swings = [r.swing_value for r in records]
+        avg = sum(swings) / len(swings)
+        # Determine dominant direction
+        positives = sum(1 for s in swings if s > 0)
+        direction = "gap-up" if positives >= len(swings) / 2 else "gap-down"
+        examples = [f"{r.ticker} ({'+' if r.swing_value > 0 else ''}{r.swing_value:.1f}%)" for r in records[:4]]
+
+        candidates.append({
+            "classification": cls,
+            "record_count": len(records),
+            "avg_swing": avg,
+            "examples": examples,
+            "direction": direction,
+        })
+
+    # Sort by record count desc, then avg abs swing desc
+    candidates.sort(key=lambda x: (x["record_count"], abs(x["avg_swing"])), reverse=True)
+    return candidates
+
+
+def _promote_rule(classification: str, direction: str, avg_swing: float):
+    """
+    Writes the new rule into Catalyst_Correlations.md's System Correlation Rules section.
+    Also updates the in-memory system DB rules text.
+    """
+    rule_line = (
+        f"- **{classification}**: Consistently produces extreme "
+        f"{'gap-ups' if direction == 'gap-up' else 'gap-downs'} "
+        f"(avg {'+' if avg_swing > 0 else ''}{avg_swing:.1f}%) — "
+        f"promoted from pattern analysis (≥3 qualifying events)."
+    )
+
+    # Read current file
+    with open(system.db.filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Append the new rule line before the end of the rules section
+    if "## System Correlation Rules" in content:
+        content = content.rstrip() + "\n" + rule_line + "\n"
+    else:
+        content += f"\n## System Correlation Rules\n{rule_line}\n"
+
+    with open(system.db.filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # Also update the Extreme Gap threshold description dynamically
+    # so PredictiveEngine.find_matches_by_classification picks it up on next query
+    system.db.load_from_markdown()
+
+
+# ── session state init ──────────────────────────────────────────────────────────
+
+if "mb_swing_result" not in st.session_state:
+    st.session_state.mb_swing_result = None
+if "mb_classification" not in st.session_state:
+    st.session_state.mb_classification = None
+if "mb_pattern_alerts" not in st.session_state:
+    st.session_state.mb_pattern_alerts = []
+if "mb_saved" not in st.session_state:
+    st.session_state.mb_saved = False
+if "mb_rule_candidates" not in st.session_state:
+    st.session_state.mb_rule_candidates = []
+if "mb_dismissed_rules" not in st.session_state:
+    st.session_state.mb_dismissed_rules = set()
+if "mb_promoted_rules" not in st.session_state:
+    st.session_state.mb_promoted_rules = set()
+
+
+# ── styles ──────────────────────────────────────────────────────────────────────
+
+st.markdown("""
+<style>
+/* Memory Bank amber accent system */
+.mb-header { 
+    color: #f59e0b; 
+    font-size: 0.72rem; 
+    font-weight: 700; 
+    text-transform: uppercase; 
+    letter-spacing: 0.12em;
+    margin-bottom: 4px;
+}
+.mb-card {
+    background: #111827;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+}
+.mb-card-accent {
+    background: #111827;
+    border: 1px solid #d97706;
+    border-left: 4px solid #f59e0b;
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+}
+.mb-swing-pos {
+    font-size: 2.4rem;
+    font-weight: 800;
+    color: #34d399;
+    font-family: 'Courier New', monospace;
+    letter-spacing: -0.02em;
+}
+.mb-swing-neg {
+    font-size: 2.4rem;
+    font-weight: 800;
+    color: #f87171;
+    font-family: 'Courier New', monospace;
+    letter-spacing: -0.02em;
+}
+.mb-label {
+    color: #6b7280;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.mb-value {
+    color: #e5e7eb;
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+.mb-badge-high   { background:#7f1d1d; color:#fca5a5; padding:2px 10px; border-radius:999px; font-size:0.78rem; font-weight:700; }
+.mb-badge-medium { background:#78350f; color:#fcd34d; padding:2px 10px; border-radius:999px; font-size:0.78rem; font-weight:700; }
+.mb-badge-watch  { background:#064e3b; color:#6ee7b7; padding:2px 10px; border-radius:999px; font-size:0.78rem; font-weight:700; }
+.mb-reason-item  { color:#9ca3af; font-size:0.84rem; padding:2px 0; }
+.mb-divider { border-top: 1px solid #1f2937; margin: 18px 0; }
+.mb-step-num {
+    background: #f59e0b;
+    color: #000;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.75rem;
+    margin-right: 8px;
+    flex-shrink: 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── tab body ────────────────────────────────────────────────────────────────────
+
+with tab_memory:
+
+    st.markdown("""
+    <div style='margin-bottom:6px'>
+        <span style='color:#f59e0b;font-size:1.45rem;font-weight:800;letter-spacing:-0.01em;'>🧠 Memory Bank</span>
+        <span style='color:#6b7280;font-size:0.88rem;margin-left:10px;'>Log a historical price event → Gemini classifies the catalyst → Pattern alerts fire for upcoming watchlist tickers</span>
+    </div>
+    <hr style='border-color:#1f2937;margin-bottom:20px;'>
+    """, unsafe_allow_html=True)
+
+    # ── STEP 1: Ticker + Date Range ────────────────────────────────────────────
+    st.markdown('<div style="display:flex;align-items:center;margin-bottom:10px"><span class="mb-step-num">1</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Select Ticker & Date Window</span></div>', unsafe_allow_html=True)
+
+    with st.container():
+        s1c1, s1c2, s1c3, s1c4 = st.columns([1.2, 1.4, 1.4, 1.2])
+        with s1c1:
+            mb_ticker = st.text_input("Ticker Symbol", value="NBIS", key="mb_ticker_input").strip().upper()
+        with s1c2:
+            mb_start = st.date_input("Start Date", value=datetime.date(2026, 8, 12), key="mb_start")
+        with s1c3:
+            mb_end = st.date_input("End Date", value=datetime.date(2026, 8, 13), key="mb_end")
+        with s1c4:
+            st.markdown("<br>", unsafe_allow_html=True)
+            fetch_btn = st.button("📡 Fetch Price Swing", type="primary", use_container_width=True, key="mb_fetch")
+
+    if fetch_btn:
+        st.session_state.mb_swing_result = None
+        st.session_state.mb_classification = None
+        st.session_state.mb_pattern_alerts = []
+        st.session_state.mb_saved = False
+        if not mb_ticker:
+            st.error("Please enter a ticker symbol.")
+        elif mb_end < mb_start:
+            st.error("End date must be after start date.")
+        else:
+            from volatility_system import HistoricalDataFetcher
+            with st.spinner(f"Querying yfinance for {mb_ticker} ({mb_start} → {mb_end})…"):
+                result = HistoricalDataFetcher.fetch_historical_swing(
+                    mb_ticker,
+                    mb_start.strftime("%Y-%m-%d"),
+                    mb_end.strftime("%Y-%m-%d")
+                )
+            if "error" in result:
+                st.error(f"Price fetch failed: {result['error']}")
+            else:
+                st.session_state.mb_swing_result = result
+
+    # ── STEP 2: Show swing + news input ────────────────────────────────────────
+    if st.session_state.mb_swing_result:
+        res = st.session_state.mb_swing_result
+        swing_pct = res["swing_pct"]
+        days = res["days"]
+        sign = "+" if swing_pct >= 0 else ""
+        swing_cls = "mb-swing-pos" if swing_pct >= 0 else "mb-swing-neg"
+        threshold_1d = abs(swing_pct) >= 10 and days == 1
+        threshold_5d = abs(swing_pct) >= 20 and days <= 5
+        qualifies = threshold_1d or threshold_5d
+
+        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="display:flex;align-items:center;margin-bottom:10px"><span class="mb-step-num">2</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Confirm Price Move</span></div>', unsafe_allow_html=True)
+
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            st.markdown(f'<div class="mb-card"><div class="mb-label">Swing ({days}d)</div><div class="{swing_cls}">{sign}{swing_pct:.2f}%</div></div>', unsafe_allow_html=True)
+        with p2:
+            st.markdown(f'<div class="mb-card"><div class="mb-label">Entry Price</div><div class="mb-value" style="font-size:1.5rem;color:#60a5fa">${res["start_price"]:.2f}</div></div>', unsafe_allow_html=True)
+        with p3:
+            st.markdown(f'<div class="mb-card"><div class="mb-label">Exit Price</div><div class="mb-value" style="font-size:1.5rem;color:#60a5fa">${res["end_price"]:.2f}</div></div>', unsafe_allow_html=True)
+        with p4:
+            q_color = "#34d399" if qualifies else "#f87171"
+            q_label = "✅ Qualifies for DB" if qualifies else "⚠️ Below Threshold"
+            q_sub = "(≥10% 1-day or ≥20% 5-day)" if not qualifies else ""
+            st.markdown(f'<div class="mb-card"><div class="mb-label">Threshold Check</div><div class="mb-value" style="color:{q_color};font-size:0.95rem">{q_label}</div><div class="mb-label">{q_sub}</div></div>', unsafe_allow_html=True)
+
+        if not qualifies:
+            st.warning(f"**{mb_ticker}** moved {sign}{swing_pct:.2f}% over {days} day(s). This is below the ±10% (1-day) or ±20% (5-day) threshold for the correlation database. You can still classify it manually using the Database Editor tab.")
+
+        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="display:flex;align-items:center;margin-bottom:10px"><span class="mb-step-num">3</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Paste Catalyst News</span></div>', unsafe_allow_html=True)
+        st.caption("Paste the earnings release, press release, or news that drove the move. The more detail, the better Gemini's classification.")
+
+        mb_news = st.text_area(
+            "Raw Catalyst Text",
+            height=180,
+            placeholder="e.g. NBIS Q2: Revenue $582.3M (5x YoY). Adjusted EBITDA +$236.2M (39.4% margin). Announced $1B+ contracts including Reflection AI through 2029. Raised contracted computing capacity targets…",
+            key="mb_news_input",
+            label_visibility="collapsed"
+        )
+
+        # API key presence check — warn early rather than at classify time
+        try:
+            _api_key_ok = bool(st.secrets.get("GEMINI_API_KEY", ""))
+        except Exception:
+            _api_key_ok = False
+        _api_key_ok = _api_key_ok or bool(os.environ.get("GEMINI_API_KEY", ""))
+        if not _api_key_ok:
+            st.warning(
+                "⚠️ **No Gemini API key detected.** Classification will fall back to the "
+                "basic rules engine (single catalyst, no weighting).\n\n"
+                "Add `GEMINI_API_KEY = 'your-key'` to `.streamlit/secrets.toml` and restart the app. "
+                "Get a free key at aistudio.google.com/app/apikey",
+                icon="🔑"
+            )
+
+        classify_btn = st.button("🤖 Classify with AI", type="primary", key="mb_classify", disabled=not mb_news)
+
+        if classify_btn and mb_news:
+            st.session_state.mb_classification = None
+            st.session_state.mb_pattern_alerts = []
+            st.session_state.mb_saved = False
+            with st.spinner("Gemini is reading the news and identifying all catalysts…"):
+                cls_results = _classify_catalyst_with_gemini(mb_ticker, swing_pct, days, mb_news)
+                st.session_state.mb_classification = cls_results  # now a list
+                # Run pattern matching across ALL classifications found
+                all_alerts = {}
+                priority = {"🔴 HIGH": 3, "🟡 MEDIUM": 2, "🟢 WATCH": 1}
+                for cls_item in cls_results:
+                    for alert in _score_watchlist_matches(cls_item["classification"], swing_pct, cls_item["trigger_metric"]):
+                        t = alert["ticker"]
+                        if t not in all_alerts or priority[alert["alert_level"]] > priority[all_alerts[t]["alert_level"]]:
+                            all_alerts[t] = alert
+                st.session_state.mb_pattern_alerts = sorted(all_alerts.values(), key=lambda x: priority[x["alert_level"]], reverse=True)
+
+    # ── STEP 4: Show classifications + pattern alerts + save ──────────────────
+    if st.session_state.mb_classification:
+        cls_list = st.session_state.mb_classification  # always a list now
+        res = st.session_state.mb_swing_result
+        swing_pct = res["swing_pct"]
+        days = res["days"]
+        sign = "+" if swing_pct >= 0 else ""
+
+        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="display:flex;align-items:center;margin-bottom:12px">'
+            f'<span class="mb-step-num">4</span>'
+            f'<span style="color:#f59e0b;font-weight:700;font-size:1rem;">Gemini\'s Classification</span>'
+            f'<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">'
+            f'{len(cls_list)} catalyst(s) identified — each saved as a separate DB record</span></div>',
+            unsafe_allow_html=True
+        )
+
+        rank_labels = {1: "PRIMARY", 2: "SECONDARY", 3: "TERTIARY", 4: "CONTRIBUTING", 5: "CONTRIBUTING"}
+        rank_colors = {1: "#f59e0b", 2: "#60a5fa", 3: "#a78bfa", 4: "#6b7280", 5: "#6b7280"}
+
+        for cls in cls_list:
+            rank = cls.get("rank", 1)
+            label = rank_labels.get(rank, "CONTRIBUTING")
+            r_color = rank_colors.get(rank, "#6b7280")
+            conf_color = {"High": "#34d399", "Medium": "#fbbf24", "Low": "#f87171"}.get(cls.get("confidence", "Low"), "#9ca3af")
+            border_color = r_color
+            weight = cls.get("weight_pct", 0)
+            w_swing = cls.get("weighted_swing", 0.0)
+            w_swing_sign = "+" if w_swing >= 0 else ""
+            w_swing_color = "#34d399" if w_swing >= 0 else "#f87171"
+            st.markdown(f"""
+            <div class="mb-card" style="border:1px solid {border_color};border-left:4px solid {border_color};margin-bottom:10px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+                    <div style="flex:1">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+                            <span style="background:{r_color};color:#000;font-size:0.65rem;font-weight:800;padding:2px 8px;border-radius:999px;letter-spacing:0.08em">{label}</span>
+                            <span style="color:{r_color};font-size:1.1rem;font-weight:800">{cls.get("classification","—")}</span>
+                        </div>
+                        <div class="mb-label" style="margin-bottom:2px">Event Type</div>
+                        <div class="mb-value" style="font-size:0.9rem;margin-bottom:8px">{cls.get("event_type","—")}</div>
+                        <div class="mb-label" style="margin-bottom:2px">Specific Trigger</div>
+                        <div style="color:#d1d5db;font-size:0.88rem">{cls.get("trigger_metric","—")}</div>
+                    </div>
+                    <div style="text-align:right;min-width:120px">
+                        <div style="margin-bottom:10px">
+                            <div class="mb-label">Confidence</div>
+                            <div style="color:{conf_color};font-weight:700;font-size:1rem">{cls.get("confidence","—")}</div>
+                        </div>
+                        <div>
+                            <div class="mb-label">Attributed Swing</div>
+                            <div style="color:{w_swing_color};font-weight:800;font-size:1.15rem;font-family:'Courier New',monospace">{w_swing_sign}{w_swing:.2f}%</div>
+                            <div style="color:#6b7280;font-size:0.72rem;margin-top:1px">{weight}% of move</div>
+                        </div>
+                    </div>
+                </div>
+                <div style="margin-top:10px;border-top:1px solid #1f2937;padding-top:8px">
+                    <span class="mb-label">Rationale: </span>
+                    <span style="color:#9ca3af;font-size:0.83rem">{cls.get("rationale","")}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ── Pattern Alerts ─────────────────────────────────────────────────────
+        alerts = st.session_state.mb_pattern_alerts
+        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="display:flex;align-items:center;margin-bottom:12px"><span class="mb-step-num">5</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Pattern Alerts — Watchlist Scan</span><span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">({len(alerts)} ticker(s) flagged)</span></div>', unsafe_allow_html=True)
+
+        if not alerts:
+            st.markdown('<div class="mb-card"><span style="color:#6b7280">No watchlist tickers matched the catalyst pattern. No alerts generated.</span></div>', unsafe_allow_html=True)
+        else:
+            for a in alerts:
+                level = a["alert_level"]
+                badge_cls = "mb-badge-high" if "HIGH" in level else ("mb-badge-medium" if "MEDIUM" in level else "mb-badge-watch")
+                reasons_html = "".join(f'<div class="mb-reason-item">• {r}</div>' for r in a["match_reasons"])
+                st.markdown(f"""
+                <div class="mb-card" style="border-left:3px solid {'#ef4444' if 'HIGH' in level else ('#f59e0b' if 'MEDIUM' in level else '#10b981')}">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+                        <span style="color:#e5e7eb;font-size:1.15rem;font-weight:800;font-family:monospace">{a['ticker']}</span>
+                        <span class="{badge_cls}">{level}</span>
+                        <span style="color:#6b7280;font-size:0.82rem">{a['event_type']} · {a['timing']}</span>
+                    </div>
+                    {reasons_html}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ── Save to DB ─────────────────────────────────────────────────────────
+        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="display:flex;align-items:center;margin-bottom:12px"><span class="mb-step-num">6</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Save to Correlation Database</span></div>', unsafe_allow_html=True)
+
+        swing_str = f"{sign}{swing_pct:.2f}% ({days} Day)"
+
+        # Preview: one row per classification with attributed (weighted) swing
+        def _preview_row(c):
+            w = c.get("weight_pct", 0)
+            ws = c.get("attributed_swing", c.get("weighted_swing", 0.0))
+            ws_sign = "+" if ws >= 0 else ""
+            ws_color = "#34d399" if ws >= 0 else "#f87171"
+            rank_lbl = rank_labels.get(c.get("rank", 1), "CONTRIBUTING")
+            return (
+                f'<div style="display:flex;gap:16px;align-items:center;padding:6px 0;border-bottom:1px solid #1f2937">'
+                f'<span style="color:#9ca3af;font-size:0.72rem;font-weight:700;min-width:90px">{rank_lbl}</span>'
+                f'<span style="color:#f59e0b;font-size:0.88rem;font-weight:700;flex:1">{c.get("classification","—")}</span>'
+                f'<span style="color:#6b7280;font-size:0.78rem;min-width:60px">{w}% of move</span>'
+                f'<span style="color:{ws_color};font-size:0.88rem;font-weight:700;font-family:monospace;min-width:70px;text-align:right">{ws_sign}{ws:.2f}%</span>'
+                f'</div>'
+            )
+        preview_rows = "".join(_preview_row(c) for c in cls_list)
+
+        col_prev, col_save = st.columns([3, 1])
+        with col_prev:
+            st.markdown(f"""
+            <div class="mb-card" style="padding:12px 16px">
+                <div style="display:flex;gap:24px;margin-bottom:10px;flex-wrap:wrap">
+                    <div><span class="mb-label">Ticker</span><br><span class="mb-value">{mb_ticker}</span></div>
+                    <div><span class="mb-label">Swing</span><br><span class="mb-value" style="color:{'#34d399' if swing_pct>=0 else '#f87171'}">{swing_str}</span></div>
+                    <div><span class="mb-label">Records to Save</span><br><span style="color:#a78bfa;font-weight:700;font-size:1.1rem">{len(cls_list)}</span></div>
+                </div>
+                <div style="border-top:1px solid #374151;padding-top:8px">{preview_rows}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_save:
+            st.markdown("<br>", unsafe_allow_html=True)
+            save_btn = st.button("💾 Save All to Memory Bank", type="primary", use_container_width=True, key="mb_save", disabled=st.session_state.mb_saved)
+
+        if save_btn and not st.session_state.mb_saved:
+            saved_count = 0
+            for cls in cls_list:
+                # attributed_swing is the weighted portion of the total move for this catalyst
+                attributed_swing_val = cls.get("attributed_swing", cls.get("weighted_swing", round(swing_pct, 2)))
+                weight_pct = cls.get("weight_pct", 100)
+                rank_lbl = rank_labels.get(cls.get("rank", 1), "CONTRIBUTING")
+                w_sign = "+" if attributed_swing_val >= 0 else ""
+                attributed_swing_str = f"{w_sign}{attributed_swing_val:.2f}% ({rank_lbl} · {weight_pct}% of {sign}{swing_pct:.2f}% {days}d move)"
+                new_record = CatalystRecord(
+                    ticker=mb_ticker,
+                    event_type=cls.get("event_type", "Earnings / Catalyst"),
+                    trigger_metric=cls.get("trigger_metric", "Event-Driven Release"),
+                    resulting_swing=attributed_swing_str,
+                    classification=cls.get("classification", "Earnings Beat"),
+                    swing_value=attributed_swing_val
+                )
+                system.db.add_record(new_record)
+                saved_count += 1
+            system.db.save()
+            st.session_state.mb_saved = True
+            st.session_state.mb_rule_candidates = _scan_for_rule_candidates()
+            st.success(f"✅ **{mb_ticker}** — {saved_count} catalyst record(s) saved to Correlation Database! `{swing_str}`")
+            st.balloons()
+
+        if st.session_state.mb_saved:
+            st.info("Records saved this session. Fetch a new ticker above to log another event.")
+
+        # ── STEP 7: Auto-Suggested Rule Promotions ─────────────────────────────
+        candidates = st.session_state.mb_rule_candidates
+        if candidates:
+            st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div style="display:flex;align-items:center;margin-bottom:12px">'
+                '<span class="mb-step-num" style="background:#a78bfa;color:#000">7</span>'
+                '<span style="color:#a78bfa;font-weight:700;font-size:1rem;">System Rule Suggestions</span>'
+                '<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">'
+                f'The pattern engine found {len(candidates)} candidate(s) ready for promotion</span></div>',
+                unsafe_allow_html=True
+            )
+
+            for i, cand in enumerate(candidates):
+                cls_name = cand["classification"]
+                already_promoted = cls_name in st.session_state.mb_promoted_rules
+
+                avg_sign = "+" if cand["avg_swing"] > 0 else ""
+                direction_label = "📈 Extreme Gap-Up" if cand["direction"] == "gap-up" else "📉 Extreme Gap-Down"
+                examples_str = " · ".join(cand["examples"])
+
+                st.markdown(f"""
+                <div class="mb-card" style="border:1px solid #7c3aed;border-left:4px solid #a78bfa;background:#1a1232;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+                        <div>
+                            <div style="color:#a78bfa;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">
+                                New Rule Candidate
+                            </div>
+                            <div style="color:#e5e7eb;font-size:1.15rem;font-weight:800">{cls_name}</div>
+                        </div>
+                        <div style="text-align:right">
+                            <div class="mb-label">Direction</div>
+                            <div style="color:#e5e7eb;font-size:0.9rem;font-weight:600">{direction_label}</div>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:28px;flex-wrap:wrap;margin-bottom:10px">
+                        <div><span class="mb-label">Qualifying Events</span><br>
+                             <span style="color:#a78bfa;font-weight:700;font-size:1.1rem">{cand['record_count']}</span>
+                             <span style="color:#6b7280;font-size:0.8rem"> (all ≥15% swing)</span></div>
+                        <div><span class="mb-label">Avg Swing</span><br>
+                             <span style="color:{'#34d399' if cand['avg_swing']>0 else '#f87171'};font-weight:700;font-size:1.1rem">{avg_sign}{cand['avg_swing']:.1f}%</span></div>
+                        <div><span class="mb-label">Evidence</span><br>
+                             <span style="color:#9ca3af;font-size:0.84rem">{examples_str}</span></div>
+                    </div>
+                    <div style="color:#6b7280;font-size:0.82rem;font-style:italic">
+                        Promoting adds this classification to the System Rules section of Catalyst_Correlations.md
+                        and activates it in the Prediction Engine for future alerts.
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if already_promoted:
+                    st.markdown(
+                        f'<div style="color:#34d399;font-size:0.88rem;margin:-8px 0 12px 0">'
+                        f'✅ <strong>{cls_name}</strong> has been promoted to a System Rule.</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    btn_col1, btn_col2, _ = st.columns([1, 1, 3])
+                    with btn_col1:
+                        if st.button(
+                            "⬆ Promote to System Rule",
+                            key=f"promote_{i}_{cls_name}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            _promote_rule(cls_name, cand["direction"], cand["avg_swing"])
+                            st.session_state.mb_promoted_rules.add(cls_name)
+                            st.session_state.mb_rule_candidates = _scan_for_rule_candidates()
+                            st.rerun()
+                    with btn_col2:
+                        if st.button(
+                            "✕ Dismiss",
+                            key=f"dismiss_{i}_{cls_name}",
+                            use_container_width=True
+                        ):
+                            st.session_state.mb_dismissed_rules.add(cls_name)
+                            st.session_state.mb_rule_candidates = _scan_for_rule_candidates()
+                            st.rerun()
