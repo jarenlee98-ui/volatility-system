@@ -177,6 +177,8 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
             raw = "".join(actual_texts).strip() if actual_texts else content_parts[-1].get("text", "").strip()
 
             raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
+            if not raw.endswith("]"):
+                raw = raw[:raw.rfind("}") + 1] + "]"
             result = json.loads(raw)
             if isinstance(result, dict):
                 result = [result]
@@ -773,6 +775,8 @@ Rules:
         raw = "".join(actual_texts).strip() if actual_texts else content_parts[-1].get("text", "").strip()
 
         raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
+        if not raw.endswith("]"):
+            raw = raw[:raw.rfind("}") + 1] + "]"
         result = json.loads(raw)
         
         # Ensure it's always a list
