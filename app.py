@@ -734,7 +734,7 @@ Rules:
         # Gemini REST endpoint — gemini-2.0-flash is free-tier eligible
         gemini_url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-3.5-flash:generateContent?key={api_key}"
+            f"gemini-2.0-flash:generateContent?key={api_key}"
         )
         resp = requests.post(
             gemini_url,
@@ -743,7 +743,7 @@ Rules:
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.2}
             },
-            timeout=25
+            timeout=60
         )
         resp.raise_for_status()
         raw_resp = resp.json()
