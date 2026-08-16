@@ -12,9 +12,15 @@ from supabase_store import (
 )
 
 try:
-    from volatility_system import EventDrivenVolatilitySystem, CatalystDatabase, EventParser, PredictiveEngine, CatalystRecord, LiveDataFetcher
+    from volatility_system import (
+        EventDrivenVolatilitySystem, CatalystDatabase, EventParser, 
+        PredictiveEngine, CatalystRecord, LiveDataFetcher, HistoricalDataFetcher
+    )
 except ImportError:
-    from volatility_system import EventDrivenVolatilitySystem, CatalystDatabase, EventParser, PredictiveEngine, CatalystRecord, LiveDataFetcher
+    from volatility_system import (
+        EventDrivenVolatilitySystem, CatalystDatabase, EventParser, 
+        PredictiveEngine, CatalystRecord, LiveDataFetcher, HistoricalDataFetcher
+    )
 
 st.set_page_config(
     page_title="Event-Driven Volatility Predictive System",
@@ -117,9 +123,8 @@ with tab_predict:
 
     def _gemini_classify_realtime(ticker: str, news_text: str) -> list:
         """
-        Uses Gemini to classify all catalysts in a live news drop.
+        Uses Gemini 3.5 Flash to classify all catalysts in a live news drop.
         Returns list of classification dicts with weight_pct.
-        No swing_pct known yet — weights used to rank DB matches.
         """
         api_key = st.secrets.get("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
         if not api_key:
@@ -133,8 +138,7 @@ News:
 {news_text}
 ---
 
-Identify ALL distinct catalysts present. Return ONLY a valid JSON array (no markdown, no preamble):
-
+Identify ALL distinct catalysts present. Return ONLY a valid JSON array matching this exact schema:
 [
   {{
     "rank": 1,
@@ -152,17 +156,31 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
         try:
             resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}",
                 headers={"Content-Type": "application/json"},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "maxOutputTokens": 4000,
+                        "temperature": 0.2
+                    }
+                },
                 timeout=25
             )
             resp.raise_for_status()
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            raw = re.sub(r"```json|```", "", raw).strip()
+            raw_resp = resp.json()
+
+            # Filter out reasoning/thought parts from Gemini 3.5 Flash
+            content_parts = raw_resp["candidates"][0]["content"].get("parts", [])
+            actual_texts = [p["text"] for p in content_parts if not p.get("thought", False) and "text" in p]
+            raw = "".join(actual_texts).strip() if actual_texts else content_parts[-1].get("text", "").strip()
+
+            raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
             result = json.loads(raw)
             if isinstance(result, dict):
                 result = [result]
+
             # Normalise weights
             total_w = sum(item.get("weight_pct", 0) for item in result)
             if total_w != 100 and total_w > 0:
@@ -675,6 +693,7 @@ with tab_database:
                     st.rerun()
                 else:
                     st.error("Please fill out all required fields.")
+
 # ==========================================
 # TAB 4: MEMORY BANK
 # ==========================================
@@ -683,10 +702,8 @@ with tab_database:
 
 def _classify_catalyst_with_gemini(ticker: str, swing_pct: float, days: int, news_text: str) -> list:
     """
-    Sends the price swing + raw news to Gemini and returns a LIST of classification dicts,
+    Sends the price swing + raw news to Gemini 3.5 Flash and returns a LIST of classification dicts,
     one per distinct catalyst present in the news. Ranked by impact (primary first).
-    Each dict: {event_type, trigger_metric, classification, confidence, rationale, rank}
-    Falls back to rule-based extraction if the API call fails.
     """
     prompt = f"""You are a quantitative event-driven analyst. A stock ({ticker}) moved {swing_pct:+.2f}% over {days} trading day(s).
 
@@ -697,43 +714,39 @@ The following catalyst news caused that move:
 
 A single price event can be driven by MULTIPLE distinct catalysts simultaneously. Identify ALL catalysts present and estimate how much of the total price move each one was responsible for.
 
-Return ONLY a valid JSON array (no markdown fences, no preamble). Each element represents one distinct catalyst, ranked by impact (most impactful first):
-
+Return ONLY a valid JSON array matching this exact schema:
 [
   {{
     "rank": 1,
     "weight_pct": 45,
-    "event_type": "<one of: Earnings / Catalyst | Macro / Sector | Clinical Data / Regulatory | Corporate Action | Guidance Cut>",
-    "trigger_metric": "<concise 1-2 sentence description of THIS SPECIFIC catalyst. Include numbers where present.>",
-    "classification": "<one of: Forward Guidance Hike | Structural Short Squeeze | Hyper-Specific Narrative Validation | Sector Sympathy Rally | Supply Chain Failure | Dividend Suspension / Capital Flight | Earnings Beat | Earnings Miss | Earnings Beat / Product Hype | Binary Pipeline Success | Mega-Contract Visibility | EBITDA Inflection | Sector Macro Tailwind>",
+    "event_type": "<Earnings / Catalyst | Macro / Sector | Clinical Data / Regulatory | Corporate Action | Guidance Cut>",
+    "trigger_metric": "<concise 1-2 sentence description of THIS SPECIFIC catalyst with exact numbers>",
+    "classification": "<Forward Guidance Hike | Structural Short Squeeze | Hyper-Specific Narrative Validation | Sector Sympathy Rally | Supply Chain Failure | Dividend Suspension / Capital Flight | Earnings Beat | Earnings Miss | Earnings Beat / Product Hype | Binary Pipeline Success | Mega-Contract Visibility | EBITDA Inflection | Sector Macro Tailwind>",
     "confidence": "<High | Medium | Low>",
     "rationale": "<1 sentence explaining why this specific catalyst drove the move>"
   }}
 ]
 
 Rules:
-- Include between 1 and 5 catalysts. Only include real, distinct drivers — do not pad.
-- Each catalyst must have a different classification.
-- The primary (rank 1) catalyst is the single biggest driver of the move.
-- If only one catalyst is present, return an array with one element.
-- weight_pct is an integer (0–100) representing each catalyst's estimated share of the total price swing. All weight_pct values MUST sum to exactly 100."""
+- Include between 1 and 5 distinct catalysts. Do not pad.
+- Each catalyst must have a unique classification.
+- The primary (rank 1) catalyst is the largest driver.
+- weight_pct must be integers (0–100) and MUST sum to exactly 100."""
 
     try:
-        # Resolve API key: Streamlit secrets → environment variable
         api_key = os.environ.get("GEMINI_API_KEY", "")
         try:
             api_key = st.secrets.get("GEMINI_API_KEY", "") or api_key
         except Exception:
-            pass  # No secrets.toml — fall back to env var (or empty)
+            pass
         if not api_key:
             raise ValueError(
                 "No Gemini API key found. Add GEMINI_API_KEY to your "
                 ".streamlit/secrets.toml or as an environment variable."
             )
 
-        # Gemini REST endpoint — gemini-2.0-flash is free-tier eligible
         gemini_url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)"
             f"gemini-3.5-flash:generateContent?key={api_key}"
         )
         resp = requests.post(
@@ -741,7 +754,11 @@ Rules:
             headers={"Content-Type": "application/json"},
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 4000, "temperature": 0.2}
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "maxOutputTokens": 4000,
+                    "temperature": 0.2
+                }
             },
             timeout=25
         )
@@ -749,14 +766,19 @@ Rules:
         raw_resp = resp.json()
         if not raw_resp.get("candidates"):
             raise ValueError(f"Gemini returned no candidates: {raw_resp}")
-        raw = raw_resp["candidates"][0]["content"]["parts"][0]["text"].strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        if not raw.endswith("]"):
-            raw = raw[:raw.rfind("}") + 1] + "]"
+
+        # Filter out reasoning/thought parts from Gemini 3.5 Flash
+        content_parts = raw_resp["candidates"][0]["content"].get("parts", [])
+        actual_texts = [p["text"] for p in content_parts if not p.get("thought", False) and "text" in p]
+        raw = "".join(actual_texts).strip() if actual_texts else content_parts[-1].get("text", "").strip()
+
+        raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
         result = json.loads(raw)
+        
         # Ensure it's always a list
         if isinstance(result, dict):
             result = [result]
+            
         # Ensure rank field exists
         for i, item in enumerate(result):
             if "rank" not in item:
@@ -766,22 +788,20 @@ Rules:
         # Normalise weights so they always sum to 100, then attach weighted swing
         total_w = sum(item.get("weight_pct", 0) for item in result)
         if total_w == 0:
-            # Fallback: equal weighting when Gemini omitted weights
             equal = round(100 / len(result))
             for item in result:
                 item["weight_pct"] = equal
             total_w = equal * len(result)
         for item in result:
             w = item.get("weight_pct", 0)
-            # Normalise to true 100 in case of rounding drift
             normalised_w = w / total_w * 100
             item["weight_pct"] = round(normalised_w)
             item["weighted_swing"] = round(swing_pct * normalised_w / 100, 2)
 
-        # Fix any rounding residual so the displayed weights sum cleanly to 100
+        # Fix any rounding residual
         diff = 100 - sum(item["weight_pct"] for item in result)
         if diff != 0:
-            result[0]["weight_pct"] += diff  # absorb residual into primary catalyst
+            result[0]["weight_pct"] += diff
 
         return result
     except Exception as e:
@@ -923,7 +943,6 @@ def _scan_for_rule_candidates() -> list:
         "Hyper-Specific Narrative Validation",
     }
 
-    # Load dismissed suggestions from session state so they stay gone
     dismissed = st.session_state.get("mb_dismissed_rules", set())
 
     from collections import defaultdict
@@ -943,7 +962,6 @@ def _scan_for_rule_candidates() -> list:
 
         swings = [r.swing_value for r in records]
         avg = sum(swings) / len(swings)
-        # Determine dominant direction
         positives = sum(1 for s in swings if s > 0)
         direction = "gap-up" if positives >= len(swings) / 2 else "gap-down"
         examples = [f"{r.ticker} ({'+' if r.swing_value > 0 else ''}{r.swing_value:.1f}%)" for r in records[:4]]
@@ -956,7 +974,6 @@ def _scan_for_rule_candidates() -> list:
             "direction": direction,
         })
 
-    # Sort by record count desc, then avg abs swing desc
     candidates.sort(key=lambda x: (x["record_count"], abs(x["avg_swing"])), reverse=True)
     return candidates
 
@@ -973,11 +990,9 @@ def _promote_rule(classification: str, direction: str, avg_swing: float):
         f"promoted from pattern analysis (≥3 qualifying events)."
     )
 
-    # Read current file
     with open(system.db.filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Append the new rule line before the end of the rules section
     if "## System Correlation Rules" in content:
         content = content.rstrip() + "\n" + rule_line + "\n"
     else:
@@ -986,8 +1001,6 @@ def _promote_rule(classification: str, direction: str, avg_swing: float):
     with open(system.db.filepath, "w", encoding="utf-8") as f:
         f.write(content)
 
-    # Also update the Extreme Gap threshold description dynamically
-    # so PredictiveEngine.find_matches_by_classification picks it up on next query
     system.db.load_from_markdown()
 
 
@@ -1013,7 +1026,6 @@ if "mb_promoted_rules" not in st.session_state:
 
 st.markdown("""
 <style>
-/* Memory Bank amber accent system */
 .mb-header { 
     color: #f59e0b; 
     font-size: 0.72rem; 
@@ -1122,7 +1134,6 @@ with tab_memory:
         elif mb_end < mb_start:
             st.error("End date must be after start date.")
         else:
-            from volatility_system import HistoricalDataFetcher
             with st.spinner(f"Querying yfinance for {mb_ticker} ({mb_start} → {mb_end})…"):
                 result = HistoricalDataFetcher.fetch_historical_swing(
                     mb_ticker,
@@ -1176,7 +1187,6 @@ with tab_memory:
             label_visibility="collapsed"
         )
 
-        # API key presence check — warn early rather than at classify time
         try:
             _api_key_ok = bool(st.secrets.get("GEMINI_API_KEY", ""))
         except Exception:
@@ -1187,7 +1197,7 @@ with tab_memory:
                 "⚠️ **No Gemini API key detected.** Classification will fall back to the "
                 "basic rules engine (single catalyst, no weighting).\n\n"
                 "Add `GEMINI_API_KEY = 'your-key'` to `.streamlit/secrets.toml` and restart the app. "
-                "Get a free key at aistudio.google.com/app/apikey",
+                "Get a key from Google AI Studio.",
                 icon="🔑"
             )
 
@@ -1199,8 +1209,7 @@ with tab_memory:
             st.session_state.mb_saved = False
             with st.spinner("Gemini is reading the news and identifying all catalysts…"):
                 cls_results = _classify_catalyst_with_gemini(mb_ticker, swing_pct, days, mb_news)
-                st.session_state.mb_classification = cls_results  # now a list
-                # Run pattern matching across ALL classifications found
+                st.session_state.mb_classification = cls_results
                 all_alerts = {}
                 priority = {"🔴 HIGH": 3, "🟡 MEDIUM": 2, "🟢 WATCH": 1}
                 for cls_item in cls_results:
@@ -1212,7 +1221,7 @@ with tab_memory:
 
     # ── STEP 4: Show classifications + pattern alerts + save ──────────────────
     if st.session_state.mb_classification:
-        cls_list = st.session_state.mb_classification  # always a list now
+        cls_list = st.session_state.mb_classification
         res = st.session_state.mb_swing_result
         swing_pct = res["swing_pct"]
         days = res["days"]
@@ -1302,10 +1311,9 @@ with tab_memory:
 
         swing_str = f"{sign}{swing_pct:.2f}% ({days} Day)"
 
-        # Preview: one row per classification with attributed (weighted) swing
         def _preview_row(c):
             w = c.get("weight_pct", 0)
-            ws = c.get("attributed_swing", c.get("weighted_swing", 0.0))
+            ws = c.get("weighted_swing", 0.0)
             ws_sign = "+" if ws >= 0 else ""
             ws_color = "#34d399" if ws >= 0 else "#f87171"
             rank_lbl = rank_labels.get(c.get("rank", 1), "CONTRIBUTING")
@@ -1338,8 +1346,7 @@ with tab_memory:
         if save_btn and not st.session_state.mb_saved:
             saved_count = 0
             for cls in cls_list:
-                # attributed_swing is the weighted portion of the total move for this catalyst
-                attributed_swing_val = cls.get("attributed_swing", cls.get("weighted_swing", round(swing_pct, 2)))
+                attributed_swing_val = cls.get("weighted_swing", round(swing_pct, 2))
                 weight_pct = cls.get("weight_pct", 100)
                 rank_lbl = rank_labels.get(cls.get("rank", 1), "CONTRIBUTING")
                 w_sign = "+" if attributed_swing_val >= 0 else ""
