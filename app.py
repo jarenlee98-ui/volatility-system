@@ -161,7 +161,6 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
-                        "responseMimeType": "application/json",
                         "maxOutputTokens": 4000,
                         "temperature": 0.2
                     }
@@ -757,7 +756,6 @@ Rules:
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "responseMimeType": "application/json",
                     "maxOutputTokens": 4000,
                     "temperature": 0.2
                 }
