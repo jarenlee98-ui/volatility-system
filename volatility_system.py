@@ -111,7 +111,7 @@ class CatalystDatabase:
 
     def export_to_markdown(self) -> str:
         md = "# Catalyst Correlations Database\n\n"
-        md += "This database maps extreme historical price swings (>= ±10% in 1 day or >= ±20% in 5 days) to their specific catalyst events. Thresholds apply in both directions (gap-up and gap-down).\n\n"
+        md += "This database maps extreme historical price swings (>= ±10% in 5 days, >= ±15% in 14 days, or >= ±20% in 30 days) to their specific catalyst events. Thresholds apply in both directions (gap-up and gap-down).\n\n"
         md += "| Ticker | Event Type | Specific Trigger/Metric | Resulting Price Swing | Catalyst Classification |\n"
         md += "|--------|------------|-------------------------|-----------------------|-------------------------|\n"
         for r in self.records:
@@ -501,28 +501,46 @@ class LiveDataFetcher:
 
     @staticmethod
     def check_and_calc_swing(ticker: str, reference_price: float) -> Dict[str, Any]:
-        swings = {"ticker": ticker.upper(), "close_1d": 0.0, "swing_1d_pct": 0.0, "close_5d": 0.0, "swing_5d_pct": 0.0, "meets_1d_threshold": False, "meets_5d_threshold": False, "error": None}
+        swings = {
+            "ticker": ticker.upper(),
+            "close_5d": 0.0, "swing_5d_pct": 0.0, "meets_5d_threshold": False,
+            "close_14d": 0.0, "swing_14d_pct": 0.0, "meets_14d_threshold": False,
+            "close_30d": 0.0, "swing_30d_pct": 0.0, "meets_30d_threshold": False,
+            "error": None
+        }
         if not YFINANCE_AVAILABLE:
             swings["error"] = "yfinance library not installed."
             return swings
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="10d")
+            hist = stock.history(period="45d")
             if hist.empty or len(hist) < 2:
                 swings["error"] = "Not enough historical candle data returned."
                 return swings
-            close_1d = float(hist["Close"].iloc[-1])
-            swing_1d = ((close_1d - reference_price) / reference_price) * 100.0
-            close_5d = close_1d
+            close_now = float(hist["Close"].iloc[-1])
+            # 5-day swing
             if len(hist) >= 6:
-                price_5d_ago = float(hist["Close"].iloc[-6])
-                swing_5d = ((close_1d - price_5d_ago) / price_5d_ago) * 100.0
-            else: swing_5d = 0.0
-            swings["close_1d"] = close_1d; swings["swing_1d_pct"] = swing_1d
-            swings["close_5d"] = close_5d; swings["swing_5d_pct"] = swing_5d
-            if abs(swing_1d) >= 10.0: swings["meets_1d_threshold"] = True
-            if abs(swing_5d) >= 25.0: swings["meets_5d_threshold"] = True
-        except Exception as e: swings["error"] = str(e)
+                swing_5d = ((close_now - float(hist["Close"].iloc[-6])) / float(hist["Close"].iloc[-6])) * 100.0
+            else:
+                swing_5d = 0.0
+            # 14-day swing
+            if len(hist) >= 15:
+                swing_14d = ((close_now - float(hist["Close"].iloc[-15])) / float(hist["Close"].iloc[-15])) * 100.0
+            else:
+                swing_14d = 0.0
+            # 30-day swing
+            if len(hist) >= 31:
+                swing_30d = ((close_now - float(hist["Close"].iloc[-31])) / float(hist["Close"].iloc[-31])) * 100.0
+            else:
+                swing_30d = 0.0
+            swings["close_5d"] = close_now;  swings["swing_5d_pct"] = swing_5d
+            swings["close_14d"] = close_now; swings["swing_14d_pct"] = swing_14d
+            swings["close_30d"] = close_now; swings["swing_30d_pct"] = swing_30d
+            if abs(swing_5d)  >= 10.0: swings["meets_5d_threshold"]  = True
+            if abs(swing_14d) >= 15.0: swings["meets_14d_threshold"] = True
+            if abs(swing_30d) >= 20.0: swings["meets_30d_threshold"] = True
+        except Exception as e:
+            swings["error"] = str(e)
         return swings
 
 class EventDrivenVolatilitySystem:
@@ -580,24 +598,34 @@ class EventDrivenVolatilitySystem:
         elif "narrative" in metrics: classification = metrics["narrative"]
         else: classification = "Earnings Beat" if swings["swing_1d_pct"] >= 0 else "Earnings Miss"
 
-        if swings["meets_1d_threshold"]:
-            val = swings["swing_1d_pct"]
-            sign = "+" if val >= 0 else ""
-            resulting_swing = f"{sign}{val:.2f}% (1 Day)"
-            record = CatalystRecord(ticker=ticker_upper, event_type="Earnings / Catalyst", trigger_metric=trigger_str, resulting_swing=resulting_swing, classification=classification, swing_value=val)
-            self.db.add_record(record)
-            self.db.save()
-            results["logged"] = True; results["record"] = record
-            results["message"] = f"SUCCESS: Actual 1-Day swing was {resulting_swing} (exceeding the ±10% threshold). Event auto-saved to Catalyst Database!"
-        elif swings["meets_5d_threshold"]:
+        if swings["meets_5d_threshold"]:
             val = swings["swing_5d_pct"]
             sign = "+" if val >= 0 else ""
             resulting_swing = f"{sign}{val:.2f}% (5 Day)"
-            record = CatalystRecord(ticker=ticker_upper, event_type="Earnings / Catalyst", trigger_metric=trigger_str, resulting_swing=resulting_swing, classification="Sector Sympathy Rally" if "sympathy" in raw_data_drop.lower() else classification, swing_value=val)
-            self.db.add_record(record)
-            self.db.save()
+            record = CatalystRecord(ticker=ticker_upper, event_type="Earnings / Catalyst", trigger_metric=trigger_str, resulting_swing=resulting_swing, classification=classification, swing_value=val)
+            self.db.add_record(record); self.db.save()
             results["logged"] = True; results["record"] = record
-            results["message"] = f"SUCCESS: Actual 5-Day swing was {resulting_swing} (exceeding the ±25% threshold). Event auto-saved to Catalyst Database!"
+            results["message"] = f"SUCCESS: Actual 5-Day swing was {resulting_swing} (exceeding the ±10% threshold). Event auto-saved to Catalyst Database!"
+        elif swings["meets_14d_threshold"]:
+            val = swings["swing_14d_pct"]
+            sign = "+" if val >= 0 else ""
+            resulting_swing = f"{sign}{val:.2f}% (14 Day)"
+            record = CatalystRecord(ticker=ticker_upper, event_type="Earnings / Catalyst", trigger_metric=trigger_str, resulting_swing=resulting_swing, classification=classification, swing_value=val)
+            self.db.add_record(record); self.db.save()
+            results["logged"] = True; results["record"] = record
+            results["message"] = f"SUCCESS: Actual 14-Day swing was {resulting_swing} (exceeding the ±15% threshold). Event auto-saved to Catalyst Database!"
+        elif swings["meets_30d_threshold"]:
+            val = swings["swing_30d_pct"]
+            sign = "+" if val >= 0 else ""
+            resulting_swing = f"{sign}{val:.2f}% (30 Day)"
+            record = CatalystRecord(ticker=ticker_upper, event_type="Earnings / Catalyst", trigger_metric=trigger_str, resulting_swing=resulting_swing, classification="Sector Sympathy Rally" if "sympathy" in raw_data_drop.lower() else classification, swing_value=val)
+            self.db.add_record(record); self.db.save()
+            results["logged"] = True; results["record"] = record
+            results["message"] = f"SUCCESS: Actual 30-Day swing was {resulting_swing} (exceeding the ±20% threshold). Event auto-saved to Catalyst Database!"
         else:
-            results["message"] = f"No record saved. Actual 1-Day swing ({swings['swing_1d_pct']:+.2f}%) and 5-Day swing ({swings['swing_5d_pct']:+.2f}%) did not cross thresholds."
+            results["message"] = (
+                f"No record saved. 5-Day: {swings['swing_5d_pct']:+.2f}% | "
+                f"14-Day: {swings['swing_14d_pct']:+.2f}% | "
+                f"30-Day: {swings['swing_30d_pct']:+.2f}% — none crossed thresholds."
+            )
         return results

@@ -409,8 +409,14 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     if swings.get("error"):
                         st.error(f"Price check failed: {swings['error']}")
                     else:
-                        actual_swing = swings["swing_1d_pct"] if swings["meets_1d_threshold"] else (swings["swing_5d_pct"] if swings["meets_5d_threshold"] else None)
-                        days_label = "1 Day" if swings["meets_1d_threshold"] else "5 Day"
+                        if swings["meets_5d_threshold"]:
+                            actual_swing = swings["swing_5d_pct"]; days_label = "5 Day"
+                        elif swings["meets_14d_threshold"]:
+                            actual_swing = swings["swing_14d_pct"]; days_label = "14 Day"
+                        elif swings["meets_30d_threshold"]:
+                            actual_swing = swings["swing_30d_pct"]; days_label = "30 Day"
+                        else:
+                            actual_swing = None; days_label = ""
                         if actual_swing is not None:
                             sign = "+" if actual_swing >= 0 else ""
                             swing_str = f"{sign}{actual_swing:.2f}% ({days_label})"
@@ -436,7 +442,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                             st.session_state.pe_logged = True
                             st.success(f"✅ Actual swing: **{swing_str}** — {saved_count} catalyst record(s) auto-saved to Correlation Database!")
                         else:
-                            st.info(f"Move did not meet threshold. 1-Day: {swings['swing_1d_pct']:+.2f}% | 5-Day: {swings['swing_5d_pct']:+.2f}%. No record saved.")
+                            st.info(f"Move did not meet threshold. 5-Day: {swings['swing_5d_pct']:+.2f}% | 14-Day: {swings['swing_14d_pct']:+.2f}% | 30-Day: {swings['swing_30d_pct']:+.2f}%. No record saved.")
 
         if st.session_state.pe_logged:
             st.info("Records logged. Paste a new news drop above to run another prediction.")
@@ -1141,9 +1147,10 @@ with tab_memory:
         days = res["days"]
         sign = "+" if swing_pct >= 0 else ""
         swing_cls = "mb-swing-pos" if swing_pct >= 0 else "mb-swing-neg"
-        threshold_1d = abs(swing_pct) >= 10 and days == 1
-        threshold_5d = abs(swing_pct) >= 20 and days <= 5
-        qualifies = threshold_1d or threshold_5d
+        threshold_5d  = abs(swing_pct) >= 10 and days <= 5
+        threshold_14d = abs(swing_pct) >= 15 and days <= 14
+        threshold_30d = abs(swing_pct) >= 20 and days <= 30
+        qualifies = threshold_5d or threshold_14d or threshold_30d
 
         st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
         st.markdown('<div style="display:flex;align-items:center;margin-bottom:10px"><span class="mb-step-num">2</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Confirm Price Move</span></div>', unsafe_allow_html=True)
@@ -1158,11 +1165,11 @@ with tab_memory:
         with p4:
             q_color = "#34d399" if qualifies else "#f87171"
             q_label = "✅ Qualifies for DB" if qualifies else "⚠️ Below Threshold"
-            q_sub = "(≥10% 1-day or ≥20% 5-day)" if not qualifies else ""
+            q_sub = "(≥10% 5-day · ≥15% 14-day · ≥20% 30-day)" if not qualifies else ""
             st.markdown(f'<div class="mb-card"><div class="mb-label">Threshold Check</div><div class="mb-value" style="color:{q_color};font-size:0.95rem">{q_label}</div><div class="mb-label">{q_sub}</div></div>', unsafe_allow_html=True)
 
         if not qualifies:
-            st.warning(f"**{mb_ticker}** moved {sign}{swing_pct:.2f}% over {days} day(s). This is below the ±10% (1-day) or ±20% (5-day) threshold for the correlation database. You can still classify it manually using the Database Editor tab.")
+            st.warning(f"**{mb_ticker}** moved {sign}{swing_pct:.2f}% over {days} day(s). This is below the ≥10% (5-day), ≥15% (14-day), or ≥20% (30-day) threshold for the correlation database. You can still classify it manually using the Database Editor tab.")
 
         st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
         st.markdown('<div style="display:flex;align-items:center;margin-bottom:10px"><span class="mb-step-num">3</span><span style="color:#f59e0b;font-weight:700;font-size:1rem;">Paste Catalyst News</span></div>', unsafe_allow_html=True)

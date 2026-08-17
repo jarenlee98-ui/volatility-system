@@ -17,6 +17,7 @@ import streamlit as st
 # ── detect whether Supabase is configured ──────────────────────────────────────
 
 def _is_configured() -> bool:
+    """Called at runtime — never at import time — so st.secrets is always ready."""
     try:
         url = st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
         key = st.secrets.get("SUPABASE_KEY", "") or os.environ.get("SUPABASE_KEY", "")
@@ -27,19 +28,23 @@ def _is_configured() -> bool:
 def _client():
     try:
         from supabase import create_client
-        url = st.secrets.get("SUPABASE_URL") or os.environ["SUPABASE_URL"]
-        key = st.secrets.get("SUPABASE_KEY") or os.environ["SUPABASE_KEY"]
+        url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY", "")
+        if not url or not key:
+            raise ValueError("SUPABASE_URL or SUPABASE_KEY is missing.")
         return create_client(url, key)
     except Exception as e:
         raise RuntimeError(f"Supabase connection failed: {e}")
 
-IS_CLOUD = _is_configured()
+# ⚠️  IS_CLOUD is NOT set at module level — st.secrets is unavailable at import
+# time on Streamlit Cloud. Each function calls _is_configured() at runtime instead.
+IS_CLOUD = False  # legacy sentinel — ignored; functions call _is_configured() directly
 
 
 # ── Watchlist ──────────────────────────────────────────────────────────────────
 
 def load_watchlist(fallback_path: str = "watchlist.json") -> list:
-    if IS_CLOUD:
+    if _is_configured():
         try:
             sb = _client()
             rows = sb.table("watchlist").select("ticker").execute().data
@@ -54,7 +59,7 @@ def load_watchlist(fallback_path: str = "watchlist.json") -> list:
 
 
 def save_watchlist(tickers: list, fallback_path: str = "watchlist.json"):
-    if IS_CLOUD:
+    if _is_configured():
         try:
             sb = _client()
             sb.table("watchlist").delete().neq("id", 0).execute()
@@ -70,7 +75,7 @@ def save_watchlist(tickers: list, fallback_path: str = "watchlist.json"):
 # ── Upcoming Events ────────────────────────────────────────────────────────────
 
 def load_upcoming_events(fallback_path: str = "upcoming_events.json") -> list:
-    if IS_CLOUD:
+    if _is_configured():
         try:
             sb = _client()
             rows = sb.table("upcoming_events").select("ticker,event_type,timing").execute().data
@@ -84,7 +89,7 @@ def load_upcoming_events(fallback_path: str = "upcoming_events.json") -> list:
 
 
 def save_upcoming_events(events: list, fallback_path: str = "upcoming_events.json"):
-    if IS_CLOUD:
+    if _is_configured():
         try:
             sb = _client()
             sb.table("upcoming_events").delete().neq("id", 0).execute()
@@ -103,7 +108,7 @@ def load_catalyst_records(fallback_path: str = "Catalyst_Correlations.md") -> li
     """
     Returns raw rows as list of dicts. CatalystDatabase.load_from_supabase() calls this.
     """
-    if IS_CLOUD:
+    if _is_configured():
         try:
             sb = _client()
             rows = sb.table("catalyst_records").select(
@@ -118,8 +123,10 @@ def load_catalyst_records(fallback_path: str = "Catalyst_Correlations.md") -> li
 def save_catalyst_records(records: list, fallback_path: str = "Catalyst_Correlations.md"):
     """
     Accepts list of CatalystRecord dataclass instances.
+    When Supabase is configured, raises an st.error and returns False on failure
+    instead of silently falling back to the local file (which gets wiped on redeploy).
     """
-    if IS_CLOUD:
+    if _is_configured():
         try:
             sb = _client()
             sb.table("catalyst_records").delete().neq("id", 0).execute()
@@ -138,5 +145,13 @@ def save_catalyst_records(records: list, fallback_path: str = "Catalyst_Correlat
                 sb.table("catalyst_records").insert(rows).execute()
             return True
         except Exception as e:
-            st.warning(f"Supabase records save failed, falling back to local file. ({e})")
-    return False  # signal caller to fall back to markdown save
+            # ⚠️  Do NOT fall back to local file — it is wiped on every redeploy.
+            # Surface the error visibly so the user knows the save did not persist.
+            st.error(
+                f"⚠️ Supabase save FAILED — record was NOT saved. "
+                f"Your data is safe in Supabase but this new entry was lost. "
+                f"Error: {e}"
+            )
+            return False
+    # Supabase not configured — local file only (dev/local use)
+    return False
