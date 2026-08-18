@@ -31,8 +31,8 @@ class CatalystDatabase:
         # Try cloud first, fall back to local markdown
         loaded_from_cloud = False
         try:
-            from supabase_store import load_catalyst_records, IS_CLOUD
-            if IS_CLOUD:
+            from supabase_store import load_catalyst_records, _is_configured
+            if _is_configured():
                 rows = load_catalyst_records(filepath)
                 if rows:
                     self.records = [
@@ -145,8 +145,8 @@ class CatalystDatabase:
     def save(self):
         # Try Supabase first (cloud), fall back to local markdown
         try:
-            from supabase_store import save_catalyst_records, IS_CLOUD
-            if IS_CLOUD:
+            from supabase_store import save_catalyst_records, _is_configured
+            if _is_configured():
                 saved = save_catalyst_records(self.records, self.filepath)
                 if saved:
                     # Also keep local markdown in sync as a readable backup

@@ -8,7 +8,6 @@ import requests
 from supabase_store import (
     load_watchlist, save_watchlist,
     load_upcoming_events, save_upcoming_events,
-    IS_CLOUD
 )
 
 try:
