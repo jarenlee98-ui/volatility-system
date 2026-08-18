@@ -5,6 +5,12 @@ import json
 import re
 import datetime
 import requests
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+
 from supabase_store import (
     load_watchlist, save_watchlist,
     load_upcoming_events, save_upcoming_events,
@@ -83,8 +89,9 @@ This system implements a transition from continuous mathematical volatility mode
 st.title("Event-Driven Volatility Correlation & Predictive Alert System")
 st.caption("Discrete Event Classification & Quantitative Arbitrage Matching Engine")
 
-tab_predict, tab_schedule, tab_database, tab_memory = st.tabs([
-    "🎯 Real-Time Prediction Engine", 
+tab_predict, tab_morning, tab_schedule, tab_database, tab_memory = st.tabs([
+    "🎯 Real-Time Prediction Engine",
+    "🌅 Morning Scan",
     "📅 Scheduler & Watchlist", 
     "🗄️ Correlation Database Editor",
     "🧠 Memory Bank"
@@ -447,7 +454,331 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
             st.info("Records logged. Paste a new news drop above to run another prediction.")
 
 # ==========================================
-# TAB 2: SCHEDULER & WATCHLIST
+# TAB 2: MORNING SCAN
+# ==========================================
+with tab_morning:
+    st.markdown("""
+    <div style='margin-bottom:6px'>
+        <span style='color:#34d399;font-size:1.45rem;font-weight:800;letter-spacing:-0.01em;'>🌅 Morning Scan</span>
+        <span style='color:#6b7280;font-size:0.88rem;margin-left:10px;'>Auto-pulls overnight news for every watchlist ticker → Gemini classifies catalysts → forecasts swing from DB</span>
+    </div>
+    <hr style='border-color:#1f2937;margin-bottom:20px;'>
+    """, unsafe_allow_html=True)
+
+    # ── session state ─────────────────────────────────────────────────────────
+    if "ms_results" not in st.session_state:
+        st.session_state.ms_results = []
+    if "ms_last_run" not in st.session_state:
+        st.session_state.ms_last_run = None
+
+    def _fetch_finnhub_news(ticker: str, api_key: str, days_back: int = 2) -> list:
+        """Fetch recent company news from Finnhub for a ticker."""
+        try:
+            import datetime as dt
+            today = dt.date.today()
+            from_date = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
+            to_date = today.strftime("%Y-%m-%d")
+            resp = requests.get(
+                "https://finnhub.io/api/v1/company-news",
+                params={"symbol": ticker, "from": from_date, "to": to_date, "token": api_key},
+                timeout=10
+            )
+            resp.raise_for_status()
+            articles = resp.json()
+            # Return top 5 most recent, combining headline + summary
+            articles = sorted(articles, key=lambda x: x.get("datetime", 0), reverse=True)[:5]
+            return [
+                {
+                    "headline": a.get("headline", ""),
+                    "summary": a.get("summary", ""),
+                    "source": a.get("source", ""),
+                    "datetime": a.get("datetime", 0),
+                    "text": f"{a.get('headline', '')}. {a.get('summary', '')}".strip()
+                }
+                for a in articles if a.get("headline")
+            ]
+        except Exception as e:
+            return []
+
+    def _fetch_aftermarket_price(ticker: str) -> float:
+        """Fetch current extended-hours or last close price via yfinance."""
+        try:
+            stock = yf.Ticker(ticker)
+            price = stock.fast_info.get("lastPrice") or stock.fast_info.get("previousClose") or 0.0
+            return float(price)
+        except Exception:
+            return 0.0
+
+    def _run_morning_scan(watchlist: list, finnhub_key: str, gemini_key: str) -> list:
+        """
+        Full pipeline: for each ticker, fetch news → classify → forecast.
+        Returns list of result dicts, one per ticker.
+        """
+        results = []
+        for ticker in watchlist:
+            ticker = ticker.upper()
+            result = {
+                "ticker": ticker,
+                "aftermarket_price": 0.0,
+                "news_items": [],
+                "all_classifications": [],
+                "forecast": None,
+                "error": None
+            }
+
+            # Step 1 — aftermarket price
+            result["aftermarket_price"] = _fetch_aftermarket_price(ticker)
+
+            # Step 2 — news
+            news_items = _fetch_finnhub_news(ticker, finnhub_key)
+            if not news_items:
+                result["error"] = "No recent news found"
+                results.append(result)
+                continue
+            result["news_items"] = news_items
+
+            # Step 3 — classify all news items via Gemini, merge classifications
+            all_cls = []
+            for article in news_items:
+                if not article["text"].strip():
+                    continue
+                prompt = f"""You are a quantitative event-driven analyst reviewing a live news drop for {ticker}.
+
+News:
+---
+{article['text']}
+---
+
+Identify ALL distinct catalysts present. Return ONLY a valid JSON array (no markdown, no preamble):
+
+[
+  {{
+    "rank": 1,
+    "event_type": "<Earnings / Catalyst | Macro / Sector | Clinical Data / Regulatory | Corporate Action | Guidance Cut>",
+    "trigger_metric": "<1-2 sentence description of this specific catalyst with key numbers>",
+    "classification": "<Forward Guidance Hike | Structural Short Squeeze | Hyper-Specific Narrative Validation | Sector Sympathy Rally | Supply Chain Failure | Dividend Suspension / Capital Flight | Earnings Beat | Earnings Miss | Earnings Beat / Product Hype | Binary Pipeline Success | Mega-Contract Visibility | EBITDA Inflection | Sector Macro Tailwind>",
+    "weight_pct": <integer, all must sum to 100>,
+    "direction": "<bullish | bearish>",
+    "confidence": "<High | Medium | Low>",
+    "rationale": "<1 sentence why this catalyst matters>"
+  }}
+]
+
+Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct must sum to 100."""
+
+                try:
+                    resp = requests.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}",
+                        headers={"Content-Type": "application/json"},
+                        json={"contents": [{"parts": [{"text": prompt}]}]},
+                        timeout=30
+                    )
+                    resp.raise_for_status()
+                    raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    raw = re.sub(r"```json|```", "", raw).strip()
+                    cls_list = json.loads(raw)
+                    if isinstance(cls_list, dict):
+                        cls_list = [cls_list]
+                    for c in cls_list:
+                        c["source_headline"] = article["headline"]
+                    all_cls.extend(cls_list)
+                except Exception:
+                    continue
+
+            if not all_cls:
+                result["error"] = "Gemini classification returned no results"
+                results.append(result)
+                continue
+
+            # Deduplicate classifications — keep highest weight per classification type
+            seen = {}
+            for c in all_cls:
+                cls_name = c.get("classification", "")
+                if cls_name not in seen or c.get("weight_pct", 0) > seen[cls_name].get("weight_pct", 0):
+                    seen[cls_name] = c
+            merged_cls = list(seen.values())
+
+            # Re-normalise weights to 100
+            total_w = sum(c.get("weight_pct", 0) for c in merged_cls)
+            if total_w > 0 and total_w != 100:
+                for c in merged_cls:
+                    c["weight_pct"] = round(c.get("weight_pct", 0) * 100 / total_w)
+                diff = 100 - sum(c["weight_pct"] for c in merged_cls)
+                merged_cls[0]["weight_pct"] += diff
+
+            result["all_classifications"] = sorted(merged_cls, key=lambda x: x.get("weight_pct", 0), reverse=True)
+
+            # Step 4 — forecast using existing _build_forecast logic
+            price = result["aftermarket_price"]
+            forecast_rows = []
+            total_min = 0.0
+            total_max = 0.0
+            bearish_weight = sum(c.get("weight_pct", 0) for c in merged_cls if c.get("direction") == "bearish")
+            dominant_direction = "bearish" if bearish_weight > 50 else "bullish"
+
+            for c in merged_cls:
+                cls_name = c.get("classification", "")
+                weight = c.get("weight_pct", 0) / 100.0
+                direction = c.get("direction", "bullish")
+                matches = system.db.find_matches_by_classification(cls_name)
+                if matches:
+                    swings = [r.swing_value for r in matches]
+                    avg_swing = sum(swings) / len(swings)
+                    contributed_min = min(swings) * weight
+                    contributed_max = max(swings) * weight
+                    db_note = f"DB ({len(matches)} match{'es' if len(matches)>1 else ''}): avg {avg_swing:+.1f}%"
+                else:
+                    if cls_name == "Forward Guidance Hike":
+                        contributed_min, contributed_max = 12.0 * weight, 20.0 * weight
+                    elif cls_name in ("Structural Short Squeeze", "Hyper-Specific Narrative Validation"):
+                        contributed_min, contributed_max = 15.0 * weight, 30.0 * weight
+                    elif direction == "bearish":
+                        contributed_min, contributed_max = -20.0 * weight, -10.0 * weight
+                    else:
+                        contributed_min, contributed_max = 2.0 * weight, 6.0 * weight
+                    db_note = "No DB match — rule estimate"
+                total_min += contributed_min
+                total_max += contributed_max
+                forecast_rows.append({
+                    "classification": cls_name,
+                    "weight_pct": c.get("weight_pct", 0),
+                    "direction": direction,
+                    "db_note": db_note,
+                    "contributed_min": contributed_min,
+                    "contributed_max": contributed_max,
+                })
+
+            sign_min = "+" if total_min >= 0 else ""
+            sign_max = "+" if total_max >= 0 else ""
+            if dominant_direction == "bullish" and total_min > 0:
+                net_text = f"{sign_min}{total_min:.1f}% to {sign_max}{total_max:.1f}% Gap Up"
+            elif dominant_direction == "bearish" and total_max < 0:
+                net_text = f"{sign_min}{total_min:.1f}% to {sign_max}{total_max:.1f}% Gap Down"
+            else:
+                net_text = f"{sign_min}{total_min:.1f}% to {sign_max}{total_max:.1f}%"
+
+            result["forecast"] = {
+                "forecast_rows": forecast_rows,
+                "net_text": net_text,
+                "total_min": total_min,
+                "total_max": total_max,
+                "projected_open": price * (1 + total_min / 100.0) if price > 0 else 0.0,
+                "dominant_direction": dominant_direction,
+            }
+            results.append(result)
+        return results
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+    watchlist = st.session_state.watchlist
+    if not watchlist:
+        st.warning("Your watchlist is empty. Add tickers in the sidebar first.")
+    else:
+        finnhub_key = st.secrets.get("FINNHUB_API_KEY", "") or os.environ.get("FINNHUB_API_KEY", "")
+        gemini_key  = st.secrets.get("GEMINI_API_KEY",  "") or os.environ.get("GEMINI_API_KEY",  "")
+
+        col_btn, col_info = st.columns([1, 3])
+        with col_btn:
+            run_scan = st.button("🔄 Run Morning Scan", type="primary", use_container_width=True)
+        with col_info:
+            if st.session_state.ms_last_run:
+                st.caption(f"Last run: {st.session_state.ms_last_run}  ·  {len(watchlist)} tickers  ·  Covers past 48h of news")
+            else:
+                st.caption(f"Covers past 48h of news  ·  {len(watchlist)} tickers in watchlist  ·  Run at 9:15am GMT-4 before market open")
+
+        if not finnhub_key:
+            st.error("FINNHUB_API_KEY not found in Streamlit secrets. Add it under Settings → Secrets.")
+        if not gemini_key:
+            st.error("GEMINI_API_KEY not found in Streamlit secrets.")
+
+        if run_scan and finnhub_key and gemini_key:
+            with st.spinner(f"Scanning {len(watchlist)} tickers — fetching news, classifying catalysts, building forecasts…"):
+                st.session_state.ms_results = _run_morning_scan(watchlist, finnhub_key, gemini_key)
+                import datetime as _dt
+                st.session_state.ms_last_run = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.success(f"Scan complete — {len(st.session_state.ms_results)} tickers processed.")
+
+        # ── Summary table ─────────────────────────────────────────────────────
+        if st.session_state.ms_results:
+            st.markdown("### 📊 Pre-Market Summary")
+            summary_rows = []
+            for r in st.session_state.ms_results:
+                if r.get("error") and not r.get("forecast"):
+                    summary_rows.append({
+                        "Ticker": r["ticker"],
+                        "Aftermarket Price": f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—",
+                        "Forecast Swing": r["error"],
+                        "Projected Open": "—",
+                        "Catalysts": "—",
+                        "Direction": "—",
+                    })
+                else:
+                    fc = r["forecast"]
+                    cls_tags = " · ".join(
+                        f"{c['classification']} ({c['weight_pct']}%)"
+                        for c in r["all_classifications"]
+                    )
+                    color = "🟢" if fc["dominant_direction"] == "bullish" else "🔴"
+                    summary_rows.append({
+                        "Ticker": r["ticker"],
+                        "Aftermarket Price": f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—",
+                        "Forecast Swing": f"{color} {fc['net_text']}",
+                        "Projected Open": f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—",
+                        "Catalysts": cls_tags,
+                        "Direction": fc["dominant_direction"].capitalize(),
+                    })
+
+            st.dataframe(
+                pd.DataFrame(summary_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Ticker":           st.column_config.TextColumn(width="small"),
+                    "Aftermarket Price":st.column_config.TextColumn(width="small"),
+                    "Forecast Swing":   st.column_config.TextColumn(width="medium"),
+                    "Projected Open":   st.column_config.TextColumn(width="small"),
+                    "Catalysts":        st.column_config.TextColumn(width="large"),
+                    "Direction":        st.column_config.TextColumn(width="small"),
+                }
+            )
+
+            # ── Per-ticker breakdown ──────────────────────────────────────────
+            st.markdown("### 🔍 Catalyst Breakdown by Ticker")
+            for r in st.session_state.ms_results:
+                ticker_color = "#34d399" if (r.get("forecast") and r["forecast"]["dominant_direction"] == "bullish") else "#f87171"
+                with st.expander(f"**{r['ticker']}** — {r['forecast']['net_text'] if r.get('forecast') else r.get('error','No data')}", expanded=False):
+                    if r.get("error") and not r.get("forecast"):
+                        st.warning(r["error"])
+                        continue
+
+                    fc = r["forecast"]
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.metric("Aftermarket Price", f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—")
+                    col_b.metric("Forecast Swing", fc["net_text"])
+                    col_c.metric("Projected Open", f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—")
+
+                    st.markdown("**Catalyst Classification Breakdown**")
+                    cls_rows = []
+                    for c in r["all_classifications"]:
+                        cls_rows.append({
+                            "Classification":  c["classification"],
+                            "Weight":          f"{c['weight_pct']}%",
+                            "Direction":       c["direction"].capitalize(),
+                            "Confidence":      c.get("confidence", "—"),
+                            "DB Note":         next((f["db_note"] for f in fc["forecast_rows"] if f["classification"] == c["classification"]), "—"),
+                            "Swing Contribution": f"{next((f['contributed_min'] for f in fc['forecast_rows'] if f['classification'] == c['classification']), 0):+.1f}% to {next((f['contributed_max'] for f in fc['forecast_rows'] if f['classification'] == c['classification']), 0):+.1f}%",
+                            "Trigger":         c.get("trigger_metric", "—"),
+                        })
+                    st.dataframe(pd.DataFrame(cls_rows), use_container_width=True, hide_index=True)
+
+                    st.markdown("**News Articles Analysed**")
+                    for article in r["news_items"]:
+                        import datetime as _dt2
+                        ts = _dt2.datetime.fromtimestamp(article["datetime"]).strftime("%Y-%m-%d %H:%M") if article.get("datetime") else ""
+                        st.markdown(f"- **{article['headline']}** _{article.get('source','')} {ts}_")
+
+
+# ==========================================
+# TAB 3: SCHEDULER & WATCHLIST
 # ==========================================
 with tab_schedule:
     st.subheader("Event Scheduler & Calendar Automation (Phase 1)")
