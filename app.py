@@ -642,7 +642,6 @@ with tab_database:
     st.subheader("🗄️ Historical Correlation Database")
     st.write("This database acts as the system's baseline ground-truth. You can view, add, or edit historical event-driven triggers.")
 
-    system.db.load_from_markdown()
     records_list = [{"Ticker": r.ticker, "Event Type": r.event_type, "Trigger Metric": r.trigger_metric, "Resulting Swing": r.resulting_swing, "Classification": r.classification, "Swing Value (%)": r.swing_value} for r in system.db.records]
     st.dataframe(pd.DataFrame(records_list), use_container_width=True, hide_index=True)
 
