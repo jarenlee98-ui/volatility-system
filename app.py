@@ -496,9 +496,9 @@ with tab_morning:
                     "text": f"{a.get('headline', '')}. {a.get('summary', '')}".strip()
                 }
                 for a in articles if a.get("headline")
-            ]
+            ], None
         except Exception as e:
-            return []
+            return [], str(e)
 
     def _fetch_aftermarket_price(ticker: str) -> float:
         """Fetch current extended-hours or last close price via yfinance."""
@@ -530,9 +530,13 @@ with tab_morning:
             result["aftermarket_price"] = _fetch_aftermarket_price(ticker)
 
             # Step 2 — news
-            news_items = _fetch_finnhub_news(ticker, finnhub_key)
+            news_items, fetch_err = _fetch_finnhub_news(ticker, finnhub_key)
+            if fetch_err:
+                result["error"] = f"Finnhub fetch error: {fetch_err}"
+                results.append(result)
+                continue
             if not news_items:
-                result["error"] = "No recent news found"
+                result["error"] = "No recent news found on Finnhub (past 48h)"
                 results.append(result)
                 continue
             result["news_items"] = news_items
@@ -568,7 +572,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
                 try:
                     resp = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}",
                         headers={"Content-Type": "application/json"},
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=30
@@ -582,11 +586,15 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     for c in cls_list:
                         c["source_headline"] = article["headline"]
                     all_cls.extend(cls_list)
-                except Exception:
+                except Exception as _gem_err:
+                    result.setdefault("gemini_errors", []).append(str(_gem_err))
                     continue
 
             if not all_cls:
-                result["error"] = "Gemini classification returned no results"
+                gem_errors = result.get("gemini_errors", [])
+                err_detail = f" Errors: {'; '.join(gem_errors[:2])}" if gem_errors else ""
+                news_texts = [a["text"][:80] for a in news_items[:2]]
+                result["error"] = f"Gemini classification returned no results.{err_detail} | News sample: {news_texts}"
                 results.append(result)
                 continue
 
