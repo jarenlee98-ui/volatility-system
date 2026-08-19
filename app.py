@@ -572,7 +572,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
                 try:
                     resp = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={gemini_key}",
                         headers={"Content-Type": "application/json"},
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=30
