@@ -676,26 +676,54 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         finnhub_key = st.secrets.get("FINNHUB_API_KEY", "") or os.environ.get("FINNHUB_API_KEY", "")
         gemini_key  = st.secrets.get("GEMINI_API_KEY",  "") or os.environ.get("GEMINI_API_KEY",  "")
 
-        col_btn, col_info = st.columns([1, 3])
-        with col_btn:
-            run_scan = st.button("🔄 Run Morning Scan", type="primary", use_container_width=True)
-        with col_info:
-            if st.session_state.ms_last_run:
-                st.caption(f"Last run: {st.session_state.ms_last_run}  ·  {len(watchlist)} tickers  ·  Covers past 48h of news")
-            else:
-                st.caption(f"Covers past 48h of news  ·  {len(watchlist)} tickers in watchlist  ·  Run at 9:15am GMT-4 before market open")
-
         if not finnhub_key:
             st.error("FINNHUB_API_KEY not found in Streamlit secrets. Add it under Settings → Secrets.")
         if not gemini_key:
             st.error("GEMINI_API_KEY not found in Streamlit secrets.")
 
-        if run_scan and finnhub_key and gemini_key:
-            with st.spinner(f"Scanning {len(watchlist)} tickers — fetching news, classifying catalysts, building forecasts…"):
-                st.session_state.ms_results = _run_morning_scan(watchlist, finnhub_key, gemini_key)
+        # ── Ticker selector ───────────────────────────────────────────────────
+        selected_tickers = st.multiselect(
+            "Select tickers to scan",
+            options=watchlist,
+            default=[],
+            placeholder="Choose one or more tickers…"
+        )
+
+        col_btn, col_clear, col_info = st.columns([1, 1, 3])
+        with col_btn:
+            run_scan = st.button(
+                f"🔄 Run Scan ({len(selected_tickers)} ticker{'s' if len(selected_tickers) != 1 else ''})",
+                type="primary",
+                use_container_width=True,
+                disabled=len(selected_tickers) == 0
+            )
+        with col_clear:
+            clear_results = st.button("🗑️ Clear All", use_container_width=True)
+        with col_info:
+            if st.session_state.ms_last_run:
+                scanned = list({r["ticker"] for r in st.session_state.ms_results})
+                st.caption(f"Last run: {st.session_state.ms_last_run}  ·  {len(scanned)} ticker(s) in table  ·  Covers past 48h of news")
+            else:
+                st.caption("Covers past 48h of news  ·  Results accumulate across scans  ·  Run at 9:15am GMT-4 before market open")
+
+        if clear_results:
+            st.session_state.ms_results = []
+            st.session_state.ms_last_run = None
+            st.rerun()
+
+        if run_scan and finnhub_key and gemini_key and selected_tickers:
+            with st.spinner(f"Scanning {len(selected_tickers)} ticker(s) — fetching news, classifying catalysts, building forecasts…"):
+                new_results = _run_morning_scan(selected_tickers, finnhub_key, gemini_key)
                 import datetime as _dt
                 st.session_state.ms_last_run = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.success(f"Scan complete — {len(st.session_state.ms_results)} tickers processed.")
+
+                # Merge into existing results — overwrite by ticker key so re-scanning updates in place
+                existing = {r["ticker"]: r for r in st.session_state.ms_results}
+                for r in new_results:
+                    existing[r["ticker"]] = r
+                st.session_state.ms_results = list(existing.values())
+
+            st.success(f"Scan complete — {len(new_results)} ticker(s) added/updated. Table now shows {len(st.session_state.ms_results)} ticker(s) total.")
 
         # ── Summary table ─────────────────────────────────────────────────────
         if st.session_state.ms_results:
