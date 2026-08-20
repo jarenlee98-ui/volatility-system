@@ -158,7 +158,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
         try:
             resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=30
@@ -509,6 +509,37 @@ with tab_morning:
         except Exception:
             return 0.0
 
+    def _check_technical_setup(ticker: str, volume_multiple: float = 2.0) -> dict:
+        """
+        Rule-based check for a Structural-Short-Squeeze-shaped technical setup:
+        volume spike + price above SMA20/50/100. No LLM call — pure market data,
+        cheap enough to run on every scan.
+        """
+        try:
+            hist = yf.Ticker(ticker).history(period="6mo")
+            if len(hist) < 100:
+                return {"hit": False, "note": "insufficient history"}
+
+            hist["avg_vol_20d"] = hist["Volume"].rolling(20).mean()
+            hist["sma20"] = hist["Close"].rolling(20).mean()
+            hist["sma50"] = hist["Close"].rolling(50).mean()
+            hist["sma100"] = hist["Close"].rolling(100).mean()
+            latest = hist.iloc[-1]
+
+            volume_spike = latest["Volume"] > volume_multiple * latest["avg_vol_20d"]
+            breakout = latest["Close"] > latest["sma20"] > latest["sma50"] > latest["sma100"]
+            hit = bool(volume_spike and breakout)
+
+            return {
+                "hit": hit,
+                "summary": (
+                    f"Vol {latest['Volume']:,.0f} vs 20d avg {latest['avg_vol_20d']:,.0f} · "
+                    f"Close {latest['Close']:.2f} above SMA20/50/100"
+                ) if hit else None,
+            }
+        except Exception as e:
+            return {"hit": False, "error": str(e)}
+
     def _run_morning_scan(watchlist: list, finnhub_key: str, gemini_key: str) -> list:
         """
         Full pipeline: for each ticker, fetch news → classify → forecast.
@@ -523,11 +554,15 @@ with tab_morning:
                 "news_items": [],
                 "all_classifications": [],
                 "forecast": None,
+                "technical": None,
                 "error": None
             }
 
             # Step 1 — aftermarket price
             result["aftermarket_price"] = _fetch_aftermarket_price(ticker)
+
+            # Step 1.5 — technical setup (volume + moving-average breakout, no LLM)
+            result["technical"] = _check_technical_setup(ticker)
 
             # Step 2 — news
             news_items, fetch_err = _fetch_finnhub_news(ticker, finnhub_key)
@@ -572,7 +607,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
                 try:
                     resp = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={gemini_key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}",
                         headers={"Content-Type": "application/json"},
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=30
@@ -746,6 +781,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         "Projected Open": "—",
                         "Catalysts": "—",
                         "Direction": "—",
+                        "Technical Setup": "🎯 Breakout" if (r.get("technical") or {}).get("hit") else "—",
                     })
                 else:
                     fc = r["forecast"]
@@ -761,6 +797,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         "Projected Open": f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—",
                         "Catalysts": cls_tags,
                         "Direction": fc["dominant_direction"].capitalize(),
+                        "Technical Setup": "🎯 Breakout" if (r.get("technical") or {}).get("hit") else "—",
                     })
 
             st.dataframe(
@@ -774,6 +811,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     "Projected Open":   st.column_config.TextColumn(width="small"),
                     "Catalysts":        st.column_config.TextColumn(width="large"),
                     "Direction":        st.column_config.TextColumn(width="small"),
+                    "Technical Setup":  st.column_config.TextColumn(width="small"),
                 }
             )
 
@@ -791,6 +829,10 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     col_a.metric("Aftermarket Price", f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—")
                     col_b.metric("Forecast Swing", fc["net_text"])
                     col_c.metric("Projected Open", f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—")
+
+                    tech = r.get("technical") or {}
+                    if tech.get("hit"):
+                        st.markdown(f"🎯 **Technical Setup detected:** {tech['summary']}")
 
                     st.markdown("**Catalyst Classification Breakdown**")
                     cls_rows = []
