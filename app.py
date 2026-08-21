@@ -385,8 +385,46 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                 with st.spinner("Gemini is reading the news and identifying all catalysts…"):
                     cls_list = _gemini_classify_realtime(pe_ticker_input, resolved_news)
                     if cls_list:
+                        fc = _build_forecast(cls_list, auto_price)
                         st.session_state.pe_classifications = cls_list
-                        st.session_state.pe_forecast = _build_forecast(cls_list, auto_price)
+                        st.session_state.pe_forecast = fc
+
+                        # ── Merge into Morning Scan table ──────────────────
+                        # Build a result dict in the same shape as _run_morning_scan output
+                        # so the manual drop shows up in Pre-Market Summary + Breakdown
+                        source_label = news_url_input.strip() if news_url_input.strip().startswith("http") else "Manual entry"
+                        manual_result = {
+                            "ticker": pe_ticker_input,
+                            "aftermarket_price": auto_price,
+                            "news_items": [{"headline": source_label, "summary": "", "source": "Manual", "datetime": 0, "text": resolved_news[:120]}],
+                            "all_classifications": [
+                                {
+                                    "classification": c.get("classification", ""),
+                                    "weight_pct":     c.get("weight_pct", 0),
+                                    "direction":      c.get("direction", "bullish"),
+                                    "confidence":     c.get("confidence", "—"),
+                                    "trigger_metric": c.get("trigger_metric", ""),
+                                }
+                                for c in cls_list
+                            ],
+                            "forecast": {
+                                "forecast_rows":       fc["forecast_rows"],
+                                "net_text":            fc["net_text"],
+                                "total_min":           fc["total_min"],
+                                "total_max":           fc["total_max"],
+                                "projected_open":      fc["projected_open"],
+                                "projected_open_low":  fc["projected_open_low"],
+                                "projected_open_high": fc["projected_open_high"],
+                                "dominant_direction":  fc["dominant_direction"],
+                            },
+                            "error": None,
+                            "source": "manual",
+                        }
+                        existing = {r["ticker"]: r for r in st.session_state.ms_results}
+                        existing[pe_ticker_input] = manual_result
+                        st.session_state.ms_results = list(existing.values())
+                        import datetime as _dt_m
+                        st.session_state.ms_last_run = _dt_m.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # ── Results ────────────────────────────────────────────────────────────────
     if st.session_state.pe_classifications and st.session_state.pe_forecast:
@@ -881,8 +919,9 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         for c in r["all_classifications"]
                     )
                     color = "🟢" if fc["dominant_direction"] == "bullish" else "🔴"
+                    source_badge = " 📝" if r.get("source") == "manual" else ""
                     summary_rows.append({
-                        "Ticker": r["ticker"],
+                        "Ticker": r["ticker"] + source_badge,
                         "Aftermarket Price": f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—",
                         "Forecast Swing": f"{color} {fc['net_text']}",
                         "Projected Open": f"${fc['projected_open']:.2f} (${fc['projected_open_low']:.2f}–${fc['projected_open_high']:.2f})" if fc["projected_open"] else "—",
@@ -934,11 +973,13 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         })
                     st.dataframe(pd.DataFrame(cls_rows), use_container_width=True, hide_index=True)
 
-                    st.markdown("**News Articles Analysed**")
+                    st.markdown("**News / Source**")
                     for article in r["news_items"]:
                         import datetime as _dt2
                         ts = _dt2.datetime.fromtimestamp(article["datetime"]).strftime("%Y-%m-%d %H:%M") if article.get("datetime") else ""
-                        st.markdown(f"- **{article['headline']}** _{article.get('source','')} {ts}_")
+                        src = article.get("source", "")
+                        label = "📝 Manual drop" if src == "Manual" else f"_{src} {ts}_"
+                        st.markdown(f"- **{article['headline']}** {label}")
 
 # ==========================================
 # TAB 2: SCHEDULER & WATCHLIST
