@@ -103,22 +103,76 @@ with tab_predict:
     st.markdown("""
     <div style='margin-bottom:6px'>
         <span style='color:#60a5fa;font-size:1.45rem;font-weight:800;letter-spacing:-0.01em;'>🎯 Real-Time Prediction Engine</span>
-        <span style='color:#6b7280;font-size:0.88rem;margin-left:10px;'>Paste a live news drop → AI identifies all catalysts → forecasts price swing from historical DB matches</span>
+        <span style='color:#6b7280;font-size:0.88rem;margin-left:10px;'>Paste a live news drop → AI flags every affected watchlist ticker → confirm → forecasts price swing per ticker</span>
     </div>
     <hr style='border-color:#1f2937;margin-bottom:20px;'>
     """, unsafe_allow_html=True)
 
     # ── session state ──────────────────────────────────────────────────────────
-    if "pe_classifications" not in st.session_state:
-        st.session_state.pe_classifications = None
-    if "pe_forecast" not in st.session_state:
-        st.session_state.pe_forecast = None
-    if "pe_ticker" not in st.session_state:
-        st.session_state.pe_ticker = ""
-    if "pe_price" not in st.session_state:
-        st.session_state.pe_price = 0.0
-    if "pe_logged" not in st.session_state:
-        st.session_state.pe_logged = False
+    if "pe_news_text" not in st.session_state:
+        st.session_state.pe_news_text = ""
+    if "pe_news_source_label" not in st.session_state:
+        st.session_state.pe_news_source_label = ""
+    if "pe_affected_tickers" not in st.session_state:
+        st.session_state.pe_affected_tickers = None   # None = no scan run yet, [] = scanned, nothing found
+    if "pe_results" not in st.session_state:
+        st.session_state.pe_results = {}              # ticker -> {classifications, forecast, price, logged}
+
+    def _gemini_identify_affected_tickers(news_text: str, watchlist: list) -> list:
+        """
+        Scans a news drop against the active watchlist and returns which tickers
+        are directly/materially affected, with direction + a one-line rationale.
+        This is a lightweight triage pass — full per-ticker catalyst classification
+        happens only after the user confirms which tickers to run.
+        """
+        api_key = st.secrets.get("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            st.error("No GEMINI_API_KEY found in secrets.")
+            return []
+        if not watchlist:
+            return []
+
+        prompt = f"""You are a quantitative event-driven analyst. A news drop just came in and you need to determine which tickers on the watchlist below are directly or materially affected by it — the ticker is the subject of the news, a named competitor/supplier/customer, or clearly part of an affected sector/theme.
+
+Watchlist: {", ".join(watchlist)}
+
+News:
+---
+{news_text}
+---
+
+Return ONLY a valid JSON array (no markdown, no preamble). Include ONLY tickers from the watchlist above that are actually affected — omit anything tenuous or unrelated:
+
+[
+  {{
+    "ticker": "<exact ticker from the watchlist above>",
+    "impact_direction": "<bullish | bearish>",
+    "confidence": "<High | Medium | Low>",
+    "impact_summary": "<1 sentence: why and how this ticker is affected>"
+  }}
+]
+
+If no watchlist tickers are affected, return an empty array []."""
+
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={api_key}",
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=30
+            )
+            resp.raise_for_status()
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            raw = re.sub(r"```json|```", "", raw).strip()
+            result = json.loads(raw)
+            if isinstance(result, dict):
+                result = [result]
+            # Guard against Gemini inventing tickers that aren't on the watchlist
+            wl_upper = {t.upper() for t in watchlist}
+            return [r for r in result if r.get("ticker", "").upper() in wl_upper]
+        except Exception as e:
+            st.error(f"Gemini ticker-impact scan failed: {e}")
+            return []
 
     def _gemini_classify_realtime(ticker: str, news_text: str) -> list:
         """
@@ -328,38 +382,26 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         except Exception as e:
             return f"URL_FETCH_ERROR: {e}"
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        news_url_input = st.text_input(
-            "Article URL (SeekingAlpha, Investing.com, etc.)",
-            placeholder="https://seekingalpha.com/article/... or https://www.investing.com/news/...",
-            key="pe_url_input"
-        )
-        raw_news = st.text_area(
-            "Or paste raw news text directly",
-            placeholder="Paste the full earnings release, press release, or news headline here...",
-            height=100,
-            key="pe_news_input"
-        )
-    with col2:
-        pe_ticker_input = st.text_input("Ticker", placeholder="e.g. NVDA", key="pe_ticker_field").strip().upper()
-        # Auto-fetch price when ticker is entered
-        auto_price = 0.0
-        if pe_ticker_input:
-            auto_price = _fetch_price_for_ticker(pe_ticker_input)
-            if auto_price > 0:
-                st.markdown(f'<div class="mb-card"><div class="mb-label">Live Aftermarket Price</div><div style="color:#34d399;font-size:1.4rem;font-weight:800;font-family:monospace">${auto_price:.2f}</div></div>', unsafe_allow_html=True)
-            else:
-                st.warning("Price unavailable — enter manually")
-                auto_price = st.number_input("Manual Price ($)", value=0.0, step=1.0, format="%.2f", key="pe_price_manual")
-        predict_btn = st.button("🎯 Analyse Catalysts", type="primary", use_container_width=True, key="pe_analyse_btn")
+    news_url_input = st.text_input(
+        "Article URL (SeekingAlpha, Investing.com, etc.)",
+        placeholder="https://seekingalpha.com/article/... or https://www.investing.com/news/...",
+        key="pe_url_input"
+    )
+    raw_news = st.text_area(
+        "Or paste raw news text directly",
+        placeholder="Paste the full earnings release, press release, or news headline here — no ticker needed, Gemini will figure out who it affects...",
+        height=120,
+        key="pe_news_input"
+    )
+    identify_btn = st.button("🔎 Identify Affected Tickers", type="primary", use_container_width=True, key="pe_identify_btn")
 
-    if predict_btn:
-        st.session_state.pe_classifications = None
-        st.session_state.pe_forecast = None
-        st.session_state.pe_logged = False
-        if not pe_ticker_input:
-            st.error("Please enter a ticker symbol.")
+    if identify_btn:
+        st.session_state.pe_affected_tickers = None
+        st.session_state.pe_results = {}
+        st.session_state.pop("pe_confirm_tickers", None)  # clear stale multiselect state so defaults refresh
+        watchlist = st.session_state.watchlist
+        if not watchlist:
+            st.error("Your watchlist is empty. Add tickers in the sidebar first.")
         else:
             # Resolve news text — URL takes priority over pasted text
             resolved_news = ""
@@ -380,194 +422,268 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
             if not resolved_news.strip():
                 st.error("Please paste news text or enter a valid article URL.")
             else:
-                st.session_state.pe_ticker = pe_ticker_input
-                st.session_state.pe_price = auto_price
-                with st.spinner("Gemini is reading the news and identifying all catalysts…"):
-                    cls_list = _gemini_classify_realtime(pe_ticker_input, resolved_news)
-                    if cls_list:
-                        fc = _build_forecast(cls_list, auto_price)
-                        st.session_state.pe_classifications = cls_list
-                        st.session_state.pe_forecast = fc
+                st.session_state.pe_news_text = resolved_news
+                st.session_state.pe_news_source_label = news_url_input.strip() if news_url_input.strip().startswith("http") else "Manual entry"
+                with st.spinner("Gemini is scanning the news against your watchlist…"):
+                    st.session_state.pe_affected_tickers = _gemini_identify_affected_tickers(resolved_news, watchlist)
 
-                        # ── Merge into Morning Scan table ──────────────────
-                        # Build a result dict in the same shape as _run_morning_scan output
-                        # so the manual drop shows up in Pre-Market Summary + Breakdown
-                        source_label = news_url_input.strip() if news_url_input.strip().startswith("http") else "Manual entry"
-                        manual_result = {
-                            "ticker": pe_ticker_input,
-                            "aftermarket_price": auto_price,
-                            "news_items": [{"headline": source_label, "summary": "", "source": "Manual", "datetime": 0, "text": resolved_news[:120]}],
-                            "all_classifications": [
-                                {
-                                    "classification": c.get("classification", ""),
-                                    "weight_pct":     c.get("weight_pct", 0),
-                                    "direction":      c.get("direction", "bullish"),
-                                    "confidence":     c.get("confidence", "—"),
-                                    "trigger_metric": c.get("trigger_metric", ""),
-                                }
-                                for c in cls_list
-                            ],
-                            "forecast": {
-                                "forecast_rows":       fc["forecast_rows"],
-                                "net_text":            fc["net_text"],
-                                "total_min":           fc["total_min"],
-                                "total_max":           fc["total_max"],
-                                "projected_open":      fc["projected_open"],
-                                "projected_open_low":  fc["projected_open_low"],
-                                "projected_open_high": fc["projected_open_high"],
-                                "dominant_direction":  fc["dominant_direction"],
-                            },
-                            "error": None,
-                            "source": "manual",
-                        }
-                        existing = {r["ticker"]: r for r in st.session_state.ms_results}
-                        existing[pe_ticker_input] = manual_result
-                        st.session_state.ms_results = list(existing.values())
-                        import datetime as _dt_m
-                        st.session_state.ms_last_run = _dt_m.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # ── Results ────────────────────────────────────────────────────────────────
-    if st.session_state.pe_classifications and st.session_state.pe_forecast:
-        cls_list = st.session_state.pe_classifications
-        fc = st.session_state.pe_forecast
-        ticker_disp = st.session_state.pe_ticker
-        price_disp = st.session_state.pe_price
-
+    # ── Step 2: Confirm affected tickers ──────────────────────────────────────
+    if st.session_state.pe_affected_tickers is not None:
         st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        affected = st.session_state.pe_affected_tickers
         st.markdown(
             f'<div style="display:flex;align-items:center;margin-bottom:12px">'
             f'<span class="mb-step-num" style="background:#60a5fa">2</span>'
-            f'<span style="color:#60a5fa;font-weight:700;font-size:1rem;">Catalyst Breakdown</span>'
-            f'<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">{len(cls_list)} catalyst(s) identified for <strong style="color:#e5e7eb">{ticker_disp}</strong></span></div>',
+            f'<span style="color:#60a5fa;font-weight:700;font-size:1rem;">Affected Tickers</span>'
+            f'<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">{len(affected)} watchlist ticker(s) flagged by Gemini — confirm or adjust below</span></div>',
+            unsafe_allow_html=True
+        )
+
+        if not affected:
+            st.info("Gemini didn't flag any watchlist tickers as affected by this news. You can still pick tickers manually below.")
+        else:
+            for a in affected:
+                direction = a.get("impact_direction", "bullish")
+                dir_color = "#34d399" if direction == "bullish" else "#f87171"
+                dir_icon = "📈" if direction == "bullish" else "📉"
+                conf_color = {"High": "#34d399", "Medium": "#fbbf24", "Low": "#f87171"}.get(a.get("confidence", "Low"), "#9ca3af")
+                st.markdown(f"""
+                <div class="mb-card" style="border:1px solid {dir_color}33;border-left:4px solid {dir_color};margin-bottom:8px">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+                        <div style="flex:1">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                                <span style="color:#e5e7eb;font-size:1.05rem;font-weight:800">{a.get("ticker","—")}</span>
+                                <span style="color:{dir_color};font-size:0.85rem">{dir_icon} {direction.capitalize()}</span>
+                            </div>
+                            <div style="color:#9ca3af;font-size:0.87rem">{a.get("impact_summary","—")}</div>
+                        </div>
+                        <div style="text-align:right;min-width:90px">
+                            <div style="color:#6b7280;font-size:0.72rem;text-transform:uppercase">Confidence</div>
+                            <div style="color:{conf_color};font-weight:700">{a.get("confidence","—")}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        default_tickers = [a.get("ticker", "").upper() for a in affected if a.get("ticker", "").upper() in st.session_state.watchlist]
+        confirm_tickers = st.multiselect(
+            "Confirm tickers to run full analysis on (add or remove as needed)",
+            options=st.session_state.watchlist,
+            default=default_tickers,
+            key="pe_confirm_tickers"
+        )
+
+        run_analysis_btn = st.button(
+            f"▶️ Run Full Analysis ({len(confirm_tickers)} ticker{'s' if len(confirm_tickers) != 1 else ''})",
+            type="primary",
+            use_container_width=True,
+            disabled=len(confirm_tickers) == 0,
+            key="pe_run_analysis_btn"
+        )
+
+        if run_analysis_btn:
+            news_text = st.session_state.pe_news_text
+            source_label = st.session_state.pe_news_source_label
+            with st.spinner(f"Classifying catalysts & building forecasts for {len(confirm_tickers)} ticker(s)…"):
+                for ticker in confirm_tickers:
+                    price = _fetch_price_for_ticker(ticker)
+                    cls_list = _gemini_classify_realtime(ticker, news_text)
+                    if not cls_list:
+                        continue
+                    fc = _build_forecast(cls_list, price)
+                    st.session_state.pe_results[ticker] = {
+                        "classifications": cls_list,
+                        "forecast": fc,
+                        "price": price,
+                        "logged": False,
+                    }
+
+                    # ── Merge into Morning Scan table ──────────────────
+                    # Same shape as _run_morning_scan output so this shows up
+                    # in Pre-Market Summary + Breakdown alongside auto-scanned tickers
+                    manual_result = {
+                        "ticker": ticker,
+                        "aftermarket_price": price,
+                        "news_items": [{"headline": source_label, "summary": "", "source": "Manual", "datetime": 0, "text": news_text[:120]}],
+                        "all_classifications": [
+                            {
+                                "classification": c.get("classification", ""),
+                                "weight_pct":     c.get("weight_pct", 0),
+                                "direction":      c.get("direction", "bullish"),
+                                "confidence":     c.get("confidence", "—"),
+                                "trigger_metric": c.get("trigger_metric", ""),
+                            }
+                            for c in cls_list
+                        ],
+                        "forecast": {
+                            "forecast_rows":       fc["forecast_rows"],
+                            "net_text":            fc["net_text"],
+                            "total_min":           fc["total_min"],
+                            "total_max":           fc["total_max"],
+                            "projected_open":      fc["projected_open"],
+                            "projected_open_low":  fc["projected_open_low"],
+                            "projected_open_high": fc["projected_open_high"],
+                            "dominant_direction":  fc["dominant_direction"],
+                        },
+                        "error": None,
+                        "source": "manual",
+                    }
+                    existing = {r["ticker"]: r for r in st.session_state.ms_results}
+                    existing[ticker] = manual_result
+                    st.session_state.ms_results = list(existing.values())
+
+                import datetime as _dt_m
+                st.session_state.ms_last_run = _dt_m.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            if st.session_state.pe_results:
+                st.success(f"Analysis complete for {len(st.session_state.pe_results)} ticker(s) — see breakdown below.")
+            else:
+                st.error("Gemini classification returned no results for any confirmed ticker.")
+
+    # ── Step 3: Catalyst Breakdown & Forecast (per ticker) ────────────────────
+    if st.session_state.pe_results:
+        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="display:flex;align-items:center;margin-bottom:12px">'
+            f'<span class="mb-step-num" style="background:#60a5fa">3</span>'
+            f'<span style="color:#60a5fa;font-weight:700;font-size:1rem;">Catalyst Breakdown &amp; Forecast</span>'
+            f'<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">{len(st.session_state.pe_results)} ticker(s) analysed</span></div>',
             unsafe_allow_html=True
         )
 
         rank_labels = {1: "PRIMARY", 2: "SECONDARY", 3: "TERTIARY", 4: "CONTRIBUTING", 5: "CONTRIBUTING"}
         rank_colors = {1: "#60a5fa", 2: "#f59e0b", 3: "#a78bfa", 4: "#6b7280", 5: "#6b7280"}
 
-        for cls in cls_list:
-            rank = cls.get("rank", 1)
-            r_color = rank_colors.get(rank, "#6b7280")
-            r_label = rank_labels.get(rank, "CONTRIBUTING")
-            direction = cls.get("direction", "bullish")
-            dir_color = "#34d399" if direction == "bullish" else "#f87171"
-            dir_icon = "📈" if direction == "bullish" else "📉"
-            conf_color = {"High": "#34d399", "Medium": "#fbbf24", "Low": "#f87171"}.get(cls.get("confidence", "Low"), "#9ca3af")
+        for ticker_disp, res in st.session_state.pe_results.items():
+            cls_list = res["classifications"]
+            fc = res["forecast"]
+            price_disp = res["price"]
+            fc_color = "#34d399" if fc["dominant_direction"] == "bullish" else "#f87171"
 
-            st.markdown(f"""
-            <div class="mb-card" style="border:1px solid {r_color}33;border-left:4px solid {r_color};margin-bottom:8px">
-                <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
-                    <div style="flex:1">
-                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                            <span style="background:{r_color};color:#000;font-size:0.65rem;font-weight:800;padding:2px 8px;border-radius:999px">{r_label}</span>
-                            <span style="color:{r_color};font-size:1.05rem;font-weight:800">{cls.get("classification","—")}</span>
-                            <span style="color:{dir_color};font-size:0.8rem">{dir_icon} {direction.capitalize()}</span>
+            with st.expander(f"📌 {ticker_disp} — {fc['net_text']}", expanded=True):
+                st.markdown(f'<div style="color:#9ca3af;font-size:0.82rem;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.08em">Specific Trigger Breakdown</div>', unsafe_allow_html=True)
+
+                for cls in cls_list:
+                    rank = cls.get("rank", 1)
+                    r_color = rank_colors.get(rank, "#6b7280")
+                    r_label = rank_labels.get(rank, "CONTRIBUTING")
+                    direction = cls.get("direction", "bullish")
+                    dir_color = "#34d399" if direction == "bullish" else "#f87171"
+                    dir_icon = "📈" if direction == "bullish" else "📉"
+                    conf_color = {"High": "#34d399", "Medium": "#fbbf24", "Low": "#f87171"}.get(cls.get("confidence", "Low"), "#9ca3af")
+
+                    st.markdown(f"""
+                    <div class="mb-card" style="border:1px solid {r_color}33;border-left:4px solid {r_color};margin-bottom:8px">
+                        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+                            <div style="flex:1">
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                                    <span style="background:{r_color};color:#000;font-size:0.65rem;font-weight:800;padding:2px 8px;border-radius:999px">{r_label}</span>
+                                    <span style="color:{r_color};font-size:1.05rem;font-weight:800">{cls.get("classification","—")}</span>
+                                    <span style="color:{dir_color};font-size:0.8rem">{dir_icon} {direction.capitalize()}</span>
+                                </div>
+                                <div style="color:#9ca3af;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Specific Trigger</div>
+                                <div style="color:#d1d5db;font-size:0.87rem;margin-bottom:6px">{cls.get("trigger_metric","—")}</div>
+                                <div style="color:#6b7280;font-size:0.82rem;font-style:italic">{cls.get("rationale","")}</div>
+                            </div>
+                            <div style="text-align:right;min-width:100px">
+                                <div style="color:#6b7280;font-size:0.72rem;text-transform:uppercase">Weight</div>
+                                <div style="color:#e5e7eb;font-weight:700;font-size:1.1rem">{cls.get("weight_pct",0)}%</div>
+                                <div style="color:#6b7280;font-size:0.72rem;text-transform:uppercase;margin-top:6px">Confidence</div>
+                                <div style="color:{conf_color};font-weight:700">{cls.get("confidence","—")}</div>
+                            </div>
                         </div>
-                        <div style="color:#9ca3af;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">Specific Trigger</div>
-                        <div style="color:#d1d5db;font-size:0.87rem;margin-bottom:6px">{cls.get("trigger_metric","—")}</div>
-                        <div style="color:#6b7280;font-size:0.82rem;font-style:italic">{cls.get("rationale","")}</div>
                     </div>
-                    <div style="text-align:right;min-width:100px">
-                        <div style="color:#6b7280;font-size:0.72rem;text-transform:uppercase">Weight</div>
-                        <div style="color:#e5e7eb;font-weight:700;font-size:1.1rem">{cls.get("weight_pct",0)}%</div>
-                        <div style="color:#6b7280;font-size:0.72rem;text-transform:uppercase;margin-top:6px">Confidence</div>
-                        <div style="color:{conf_color};font-weight:700">{cls.get("confidence","—")}</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
 
-        # ── Forecast ───────────────────────────────────────────────────────────
-        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div style="display:flex;align-items:center;margin-bottom:12px"><span class="mb-step-num" style="background:#60a5fa">3</span><span style="color:#60a5fa;font-weight:700;font-size:1rem;">Price Forecast</span></div>', unsafe_allow_html=True)
+                # ── Forecast ───────────────────────────────────────────────────
+                p1, p2, p3 = st.columns(3)
+                with p1:
+                    st.markdown(f'<div class="mb-card"><div class="mb-label">Forecasted Swing</div><div style="color:{fc_color};font-size:1.6rem;font-weight:800;font-family:monospace">{fc["net_text"].split("of ")[-1]}</div></div>', unsafe_allow_html=True)
+                with p2:
+                    st.markdown(f'<div class="mb-card"><div class="mb-label">Projected Open (Midpoint)</div><div style="color:#60a5fa;font-size:1.6rem;font-weight:800;font-family:monospace">${fc["projected_open"]:.2f}</div><div style="color:#6b7280;font-size:0.78rem;margin-top:4px">Floor ${fc["projected_open_low"]:.2f} · Ceiling ${fc["projected_open_high"]:.2f}</div></div>', unsafe_allow_html=True)
+                with p3:
+                    st.markdown(f'<div class="mb-card"><div class="mb-label">Entry Price</div><div style="color:#9ca3af;font-size:1.6rem;font-weight:800;font-family:monospace">${price_disp:.2f}</div></div>', unsafe_allow_html=True)
 
-        fc_color = "#34d399" if fc["dominant_direction"] == "bullish" else "#f87171"
-        p1, p2, p3 = st.columns(3)
-        with p1:
-            st.markdown(f'<div class="mb-card"><div class="mb-label">Forecasted Swing</div><div style="color:{fc_color};font-size:1.6rem;font-weight:800;font-family:monospace">{fc["net_text"].split("of ")[-1]}</div></div>', unsafe_allow_html=True)
-        with p2:
-            st.markdown(f'<div class="mb-card"><div class="mb-label">Projected Open (Midpoint)</div><div style="color:#60a5fa;font-size:1.6rem;font-weight:800;font-family:monospace">${fc["projected_open"]:.2f}</div><div style="color:#6b7280;font-size:0.78rem;margin-top:4px">Floor ${fc["projected_open_low"]:.2f} · Ceiling ${fc["projected_open_high"]:.2f}</div></div>', unsafe_allow_html=True)
-        with p3:
-            st.markdown(f'<div class="mb-card"><div class="mb-label">Entry Price</div><div style="color:#9ca3af;font-size:1.6rem;font-weight:800;font-family:monospace">${price_disp:.2f}</div></div>', unsafe_allow_html=True)
+                # Forecast breakdown table
+                st.markdown("<br>", unsafe_allow_html=True)
+                for row in fc["forecast_rows"]:
+                    d_color = "#34d399" if row["direction"] == "bullish" else "#f87171"
+                    c_min = row["contributed_min"]
+                    c_max = row["contributed_max"]
+                    s1 = "+" if c_min >= 0 else ""
+                    s2 = "+" if c_max >= 0 else ""
+                    st.markdown(
+                        f'<div style="display:flex;gap:14px;align-items:center;padding:6px 4px;border-bottom:1px solid #1f2937;flex-wrap:wrap">'
+                        f'<span style="color:#e5e7eb;font-size:0.88rem;font-weight:700;min-width:220px">{row["classification"]}</span>'
+                        f'<span style="color:#6b7280;font-size:0.78rem;min-width:55px">{row["weight_pct"]}% weight</span>'
+                        f'<span style="color:{d_color};font-size:0.82rem;flex:1">{row["db_note"]}</span>'
+                        f'<span style="color:{d_color};font-family:monospace;font-weight:700;font-size:0.88rem;min-width:120px;text-align:right">{s1}{c_min:.1f}% to {s2}{c_max:.1f}%</span>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
 
-        # Forecast breakdown table
-        st.markdown("<br>", unsafe_allow_html=True)
-        for row in fc["forecast_rows"]:
-            d_color = "#34d399" if row["direction"] == "bullish" else "#f87171"
-            c_min = row["contributed_min"]
-            c_max = row["contributed_max"]
-            s1 = "+" if c_min >= 0 else ""
-            s2 = "+" if c_max >= 0 else ""
-            st.markdown(
-                f'<div style="display:flex;gap:14px;align-items:center;padding:6px 4px;border-bottom:1px solid #1f2937;flex-wrap:wrap">'
-                f'<span style="color:#e5e7eb;font-size:0.88rem;font-weight:700;min-width:220px">{row["classification"]}</span>'
-                f'<span style="color:#6b7280;font-size:0.78rem;min-width:55px">{row["weight_pct"]}% weight</span>'
-                f'<span style="color:{d_color};font-size:0.82rem;flex:1">{row["db_note"]}</span>'
-                f'<span style="color:{d_color};font-family:monospace;font-weight:700;font-size:0.88rem;min-width:120px;text-align:right">{s1}{c_min:.1f}% to {s2}{c_max:.1f}%</span>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
+                # Playbook
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown(f'<div class="directive-card"><h4 style="margin:0 0 5px 0;color:#93c5fd;">📋 System Directive</h4><p style="margin:0;font-size:0.93rem;">{fc["directive"]}</p></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="actionable-card"><h4 style="margin:0 0 5px 0;color:#a7f3d0;">⚡ Actionable Playbook</h4><p style="margin:0;font-size:0.93rem;">{fc["playbook"]}</p></div>', unsafe_allow_html=True)
 
-        # Playbook
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(f'<div class="directive-card"><h4 style="margin:0 0 5px 0;color:#93c5fd;">📋 System Directive</h4><p style="margin:0;font-size:0.93rem;">{fc["directive"]}</p></div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="actionable-card"><h4 style="margin:0 0 5px 0;color:#a7f3d0;">⚡ Actionable Playbook</h4><p style="margin:0;font-size:0.93rem;">{fc["playbook"]}</p></div>', unsafe_allow_html=True)
+                # ── Performance Verification & Auto-Log ─────────────────────────
+                st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
+                st.caption("After market close, click below to fetch the actual price swing and auto-save qualifying records to the Correlation Database.")
 
-        # ── Phase 3: Auto-log ──────────────────────────────────────────────────
-        st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div style="display:flex;align-items:center;margin-bottom:12px"><span class="mb-step-num" style="background:#60a5fa">4</span><span style="color:#60a5fa;font-weight:700;font-size:1rem;">Performance Verification & Auto-Log</span></div>', unsafe_allow_html=True)
-        st.caption("After market close, click below to fetch the actual price swing and auto-save qualifying records to the Correlation Database.")
-
-        col_v1, col_v2 = st.columns([1, 2])
-        with col_v1:
-            verify_btn = st.button("📊 Check Market Close & Auto-Log", type="secondary", use_container_width=True, key="pe_verify_btn", disabled=st.session_state.pe_logged)
-        with col_v2:
-            if verify_btn and not st.session_state.pe_logged:
-                if ticker_disp == "":
-                    st.error("No ticker detected.")
-                else:
-                    with st.spinner(f"Fetching actual close price for {ticker_disp}…"):
-                        swings = LiveDataFetcher.check_and_calc_swing(ticker_disp, price_disp)
-                    if swings.get("error"):
-                        st.error(f"Price check failed: {swings['error']}")
-                    else:
-                        if swings["meets_5d_threshold"]:
-                            actual_swing = swings["swing_5d_pct"]; days_label = "5 Day"
-                        elif swings["meets_14d_threshold"]:
-                            actual_swing = swings["swing_14d_pct"]; days_label = "14 Day"
-                        elif swings["meets_30d_threshold"]:
-                            actual_swing = swings["swing_30d_pct"]; days_label = "30 Day"
+                col_v1, col_v2 = st.columns([1, 2])
+                with col_v1:
+                    verify_btn = st.button(
+                        "📊 Check Market Close & Auto-Log",
+                        type="secondary",
+                        use_container_width=True,
+                        key=f"pe_verify_btn_{ticker_disp}",
+                        disabled=res["logged"]
+                    )
+                with col_v2:
+                    if verify_btn and not res["logged"]:
+                        with st.spinner(f"Fetching actual close price for {ticker_disp}…"):
+                            swings = LiveDataFetcher.check_and_calc_swing(ticker_disp, price_disp)
+                        if swings.get("error"):
+                            st.error(f"Price check failed: {swings['error']}")
                         else:
-                            actual_swing = None; days_label = ""
-                        if actual_swing is not None:
-                            sign = "+" if actual_swing >= 0 else ""
-                            swing_str = f"{sign}{actual_swing:.2f}% ({days_label})"
-                            saved_count = 0
-                            rank_labels_save = {1: "PRIMARY", 2: "SECONDARY", 3: "TERTIARY", 4: "CONTRIBUTING", 5: "CONTRIBUTING"}
-                            for cls in cls_list:
-                                w = cls.get("weight_pct", 100)
-                                attr_swing = round(actual_swing * w / 100, 2)
-                                attr_sign = "+" if attr_swing >= 0 else ""
-                                rl = rank_labels_save.get(cls.get("rank", 1), "CONTRIBUTING")
-                                attr_str = f"{attr_sign}{attr_swing:.2f}% ({rl} · {w}% of {sign}{actual_swing:.2f}% {days_label} move)"
-                                record = CatalystRecord(
-                                    ticker=ticker_disp,
-                                    event_type=cls.get("event_type", "Earnings / Catalyst"),
-                                    trigger_metric=cls.get("trigger_metric", "Event-Driven Release"),
-                                    resulting_swing=attr_str,
-                                    classification=cls.get("classification", "Earnings Beat"),
-                                    swing_value=attr_swing
-                                )
-                                system.db.add_record(record)
-                                saved_count += 1
-                            system.db.save()
-                            st.session_state.pe_logged = True
-                            st.success(f"✅ Actual swing: **{swing_str}** — {saved_count} catalyst record(s) auto-saved to Correlation Database!")
-                        else:
-                            st.info(f"Move did not meet threshold. 5-Day: {swings['swing_5d_pct']:+.2f}% | 14-Day: {swings['swing_14d_pct']:+.2f}% | 30-Day: {swings['swing_30d_pct']:+.2f}%. No record saved.")
+                            if swings["meets_5d_threshold"]:
+                                actual_swing = swings["swing_5d_pct"]; days_label = "5 Day"
+                            elif swings["meets_14d_threshold"]:
+                                actual_swing = swings["swing_14d_pct"]; days_label = "14 Day"
+                            elif swings["meets_30d_threshold"]:
+                                actual_swing = swings["swing_30d_pct"]; days_label = "30 Day"
+                            else:
+                                actual_swing = None; days_label = ""
+                            if actual_swing is not None:
+                                sign = "+" if actual_swing >= 0 else ""
+                                swing_str = f"{sign}{actual_swing:.2f}% ({days_label})"
+                                saved_count = 0
+                                rank_labels_save = {1: "PRIMARY", 2: "SECONDARY", 3: "TERTIARY", 4: "CONTRIBUTING", 5: "CONTRIBUTING"}
+                                for cls in cls_list:
+                                    w = cls.get("weight_pct", 100)
+                                    attr_swing = round(actual_swing * w / 100, 2)
+                                    attr_sign = "+" if attr_swing >= 0 else ""
+                                    rl = rank_labels_save.get(cls.get("rank", 1), "CONTRIBUTING")
+                                    attr_str = f"{attr_sign}{attr_swing:.2f}% ({rl} · {w}% of {sign}{actual_swing:.2f}% {days_label} move)"
+                                    record = CatalystRecord(
+                                        ticker=ticker_disp,
+                                        event_type=cls.get("event_type", "Earnings / Catalyst"),
+                                        trigger_metric=cls.get("trigger_metric", "Event-Driven Release"),
+                                        resulting_swing=attr_str,
+                                        classification=cls.get("classification", "Earnings Beat"),
+                                        swing_value=attr_swing
+                                    )
+                                    system.db.add_record(record)
+                                    saved_count += 1
+                                system.db.save()
+                                st.session_state.pe_results[ticker_disp]["logged"] = True
+                                st.success(f"✅ Actual swing: **{swing_str}** — {saved_count} catalyst record(s) auto-saved to Correlation Database!")
+                            else:
+                                st.info(f"Move did not meet threshold. 5-Day: {swings['swing_5d_pct']:+.2f}% | 14-Day: {swings['swing_14d_pct']:+.2f}% | 30-Day: {swings['swing_30d_pct']:+.2f}%. No record saved.")
 
-        if st.session_state.pe_logged:
-            st.info("Records logged. Paste a new news drop above to run another prediction.")
+                if res["logged"]:
+                    st.info("Records logged for this ticker.")
 
     # ── Morning Scan section ───────────────────────────────────────────────────
     st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
