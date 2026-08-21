@@ -31,6 +31,24 @@ st.set_page_config(
 WATCHLIST_FILE = "watchlist.json"
 EVENTS_FILE = "upcoming_events.json"
 DB_FILE_PATH = "Catalyst_Correlations.md"
+PE_RESULTS_FILE = "pe_results.json"
+MS_RESULTS_FILE = "ms_results.json"
+
+def _save_json(path: str, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _load_json(path: str, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return default
 
 if "db_path" not in st.session_state:
     st.session_state.db_path = DB_FILE_PATH
@@ -43,6 +61,16 @@ if "watchlist" not in st.session_state:
 
 if "upcoming_events" not in st.session_state:
     st.session_state.upcoming_events = load_upcoming_events()
+
+if "pe_results" not in st.session_state:
+    st.session_state.pe_results = _load_json(PE_RESULTS_FILE, {})
+
+if "ms_results" not in st.session_state:
+    loaded_ms = _load_json(MS_RESULTS_FILE, [])
+    st.session_state.ms_results = loaded_ms
+
+if "ms_last_run" not in st.session_state:
+    st.session_state.ms_last_run = None
 
 system = st.session_state.system
 
@@ -115,8 +143,7 @@ with tab_predict:
         st.session_state.pe_news_source_label = ""
     if "pe_affected_tickers" not in st.session_state:
         st.session_state.pe_affected_tickers = None   # None = no scan run yet, [] = scanned, nothing found
-    if "pe_results" not in st.session_state:
-        st.session_state.pe_results = {}              # ticker -> {classifications, forecast, price, logged}
+    # pe_results is loaded from disk at startup — don't re-init here
 
     def _gemini_identify_affected_tickers(news_text: str, watchlist: list) -> list:
         """
@@ -397,7 +424,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
     if identify_btn:
         st.session_state.pe_affected_tickers = None
-        st.session_state.pe_results = {}
+        # NOTE: pe_results is NOT wiped — new news accumulates per ticker
         st.session_state.pop("pe_confirm_tickers", None)  # clear stale multiselect state so defaults refresh
         watchlist = st.session_state.watchlist
         if not watchlist:
@@ -487,15 +514,51 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
             with st.spinner(f"Classifying catalysts & building forecasts for {len(confirm_tickers)} ticker(s)…"):
                 for ticker in confirm_tickers:
                     price = _fetch_price_for_ticker(ticker)
-                    cls_list = _gemini_classify_realtime(ticker, news_text)
-                    if not cls_list:
+                    new_cls_list = _gemini_classify_realtime(ticker, news_text)
+                    if not new_cls_list:
                         continue
-                    fc = _build_forecast(cls_list, price)
+
+                    # ── Accumulate news items per ticker ───────────────────────
+                    existing = st.session_state.pe_results.get(ticker, {})
+                    prev_news = existing.get("news_items", [])
+                    new_news_entry = {
+                        "headline": source_label or news_text[:120],
+                        "text": news_text,
+                        "source": source_label or "Manual",
+                        "datetime": 0,
+                    }
+                    # Avoid exact duplicate entries
+                    if not any(n.get("text", "") == news_text for n in prev_news):
+                        prev_news = prev_news + [new_news_entry]
+
+                    # ── Merge classifications — keep highest weight per type ──
+                    prev_cls = existing.get("classifications", [])
+                    merged_map = {c["classification"]: c for c in prev_cls}
+                    for c in new_cls_list:
+                        key = c.get("classification", "")
+                        if key not in merged_map or c.get("weight_pct", 0) > merged_map[key].get("weight_pct", 0):
+                            merged_map[key] = c
+                    merged_cls = list(merged_map.values())
+
+                    # Re-normalise merged weights to 100
+                    total_w = sum(c.get("weight_pct", 0) for c in merged_cls)
+                    if total_w > 0 and total_w != 100:
+                        for c in merged_cls:
+                            c["weight_pct"] = round(c.get("weight_pct", 0) * 100 / total_w)
+                        diff = 100 - sum(c["weight_pct"] for c in merged_cls)
+                        if merged_cls:
+                            merged_cls[0]["weight_pct"] += diff
+
+                    # ── Rebuild forecast from ALL accumulated classifications ─
+                    use_price = price if price else existing.get("price", 0.0)
+                    fc = _build_forecast(merged_cls, use_price)
+
                     st.session_state.pe_results[ticker] = {
-                        "classifications": cls_list,
+                        "classifications": merged_cls,
+                        "news_items": prev_news,
                         "forecast": fc,
-                        "price": price,
-                        "logged": False,
+                        "price": use_price,
+                        "logged": existing.get("logged", False),
                     }
 
                     # ── Merge into Morning Scan table ──────────────────
@@ -503,8 +566,8 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     # in Pre-Market Summary + Breakdown alongside auto-scanned tickers
                     manual_result = {
                         "ticker": ticker,
-                        "aftermarket_price": price,
-                        "news_items": [{"headline": source_label, "summary": "", "source": "Manual", "datetime": 0, "text": news_text[:120]}],
+                        "aftermarket_price": use_price,
+                        "news_items": prev_news,
                         "all_classifications": [
                             {
                                 "classification": c.get("classification", ""),
@@ -513,7 +576,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                                 "confidence":     c.get("confidence", "—"),
                                 "trigger_metric": c.get("trigger_metric", ""),
                             }
-                            for c in cls_list
+                            for c in merged_cls
                         ],
                         "forecast": {
                             "forecast_rows":       fc["forecast_rows"],
@@ -528,12 +591,15 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         "error": None,
                         "source": "manual",
                     }
-                    existing = {r["ticker"]: r for r in st.session_state.ms_results}
-                    existing[ticker] = manual_result
-                    st.session_state.ms_results = list(existing.values())
+                    existing_ms = {r["ticker"]: r for r in st.session_state.ms_results}
+                    existing_ms[ticker] = manual_result
+                    st.session_state.ms_results = list(existing_ms.values())
 
-                import datetime as _dt_m
-                st.session_state.ms_last_run = _dt_m.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Persist both stores to disk after each run
+            import datetime as _dt_m
+            st.session_state.ms_last_run = _dt_m.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_json(PE_RESULTS_FILE, st.session_state.pe_results)
+            _save_json(MS_RESULTS_FILE, st.session_state.ms_results)
 
             if st.session_state.pe_results:
                 st.success(f"Analysis complete for {len(st.session_state.pe_results)} ticker(s) — see breakdown below.")
@@ -547,20 +613,118 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
             f'<div style="display:flex;align-items:center;margin-bottom:12px">'
             f'<span class="mb-step-num" style="background:#60a5fa">3</span>'
             f'<span style="color:#60a5fa;font-weight:700;font-size:1rem;">Catalyst Breakdown &amp; Forecast</span>'
-            f'<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">{len(st.session_state.pe_results)} ticker(s) analysed</span></div>',
+            f'<span style="color:#6b7280;font-size:0.82rem;margin-left:10px;">{len(st.session_state.pe_results)} ticker(s) analysed — news accumulates; swing is weighted across all inputs</span></div>',
             unsafe_allow_html=True
         )
+
+        # ── Manage / Delete controls ───────────────────────────────────────────
+        with st.expander("🗑️ Manage News & Delete Tickers", expanded=False):
+            tickers_in_results = list(st.session_state.pe_results.keys())
+
+            # Delete a whole ticker
+            st.markdown("**Delete entire ticker**")
+            del_col1, del_col2 = st.columns([2, 1])
+            with del_col1:
+                del_ticker_pe = st.selectbox(
+                    "Select ticker to remove",
+                    options=["— select —"] + tickers_in_results,
+                    key="pe_del_ticker_select"
+                )
+            with del_col2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🗑️ Delete Ticker", key="pe_del_ticker_btn",
+                             disabled=del_ticker_pe == "— select —",
+                             use_container_width=True):
+                    del st.session_state.pe_results[del_ticker_pe]
+                    _save_json(PE_RESULTS_FILE, st.session_state.pe_results)
+                    st.success(f"Removed {del_ticker_pe} and all its news.")
+                    st.rerun()
+
+            st.markdown("---")
+            # Delete individual news items per ticker
+            st.markdown("**Delete individual news item**")
+            news_ticker_sel = st.selectbox(
+                "Ticker to manage news for",
+                options=["— select —"] + tickers_in_results,
+                key="pe_news_ticker_sel"
+            )
+            if news_ticker_sel != "— select —":
+                ticker_res = st.session_state.pe_results.get(news_ticker_sel, {})
+                news_items = ticker_res.get("news_items", [])
+                if not news_items:
+                    st.info("No news items stored for this ticker.")
+                else:
+                    for ni, news_item in enumerate(news_items):
+                        label = news_item.get("headline") or news_item.get("text", "")[:80]
+                        src = news_item.get("source", "")
+                        ncol1, ncol2 = st.columns([4, 1])
+                        with ncol1:
+                            st.markdown(f"<span style='color:#9ca3af;font-size:0.85rem'>{ni+1}. <b>{label}</b> <em>({src})</em></span>", unsafe_allow_html=True)
+                        with ncol2:
+                            if st.button("🗑️ Remove", key=f"pe_del_news_{news_ticker_sel}_{ni}",
+                                         use_container_width=True):
+                                remaining = [n for idx, n in enumerate(news_items) if idx != ni]
+                                st.session_state.pe_results[news_ticker_sel]["news_items"] = remaining
+
+                                # Recompute merged classifications from remaining news
+                                if remaining:
+                                    new_map = {}
+                                    for rn in remaining:
+                                        rn_cls = _gemini_classify_realtime(news_ticker_sel, rn.get("text", ""))
+                                        for c in rn_cls:
+                                            key = c.get("classification", "")
+                                            if key not in new_map or c.get("weight_pct", 0) > new_map[key].get("weight_pct", 0):
+                                                new_map[key] = c
+                                    merged = list(new_map.values())
+                                    total_w = sum(c.get("weight_pct", 0) for c in merged)
+                                    if total_w > 0 and total_w != 100:
+                                        for c in merged:
+                                            c["weight_pct"] = round(c.get("weight_pct", 0) * 100 / total_w)
+                                        diff = 100 - sum(c["weight_pct"] for c in merged)
+                                        if merged:
+                                            merged[0]["weight_pct"] += diff
+                                    use_price = ticker_res.get("price", 0.0)
+                                    new_fc = _build_forecast(merged, use_price)
+                                    st.session_state.pe_results[news_ticker_sel]["classifications"] = merged
+                                    st.session_state.pe_results[news_ticker_sel]["forecast"] = new_fc
+                                else:
+                                    # No news left — clear classifications and forecast
+                                    st.session_state.pe_results[news_ticker_sel]["classifications"] = []
+                                    st.session_state.pe_results[news_ticker_sel]["forecast"] = None
+
+                                _save_json(PE_RESULTS_FILE, st.session_state.pe_results)
+                                st.success(f"Removed news item. Forecast recalculated from {len(remaining)} remaining item(s).")
+                                st.rerun()
+
+            st.markdown("---")
+            if st.button("🗑️ Clear ALL tickers & news", key="pe_clear_all_btn", use_container_width=True):
+                st.session_state.pe_results = {}
+                _save_json(PE_RESULTS_FILE, {})
+                st.rerun()
 
         rank_labels = {1: "PRIMARY", 2: "SECONDARY", 3: "TERTIARY", 4: "CONTRIBUTING", 5: "CONTRIBUTING"}
         rank_colors = {1: "#60a5fa", 2: "#f59e0b", 3: "#a78bfa", 4: "#6b7280", 5: "#6b7280"}
 
         for ticker_disp, res in st.session_state.pe_results.items():
+            if not res.get("forecast"):
+                continue
             cls_list = res["classifications"]
             fc = res["forecast"]
             price_disp = res["price"]
             fc_color = "#34d399" if fc["dominant_direction"] == "bullish" else "#f87171"
 
-            with st.expander(f"📌 {ticker_disp} — {fc['net_text']}", expanded=True):
+            news_count = len(res.get("news_items", []))
+            news_badge = f" · {news_count} news item{'s' if news_count != 1 else ''}" if news_count else ""
+            with st.expander(f"📌 {ticker_disp} — {fc['net_text']}{news_badge}", expanded=True):
+                # Show accumulated news sources
+                if res.get("news_items"):
+                    st.markdown(f'<div style="color:#6b7280;font-size:0.78rem;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.08em">Accumulated News ({news_count} item{"s" if news_count != 1 else ""} — swing is weighted across all)</div>', unsafe_allow_html=True)
+                    for ni, nitem in enumerate(res["news_items"]):
+                        label = nitem.get("headline") or nitem.get("text", "")[:100]
+                        src = nitem.get("source", "Manual")
+                        st.markdown(f'<div style="color:#9ca3af;font-size:0.82rem;padding:2px 0">📰 <b>{ni+1}.</b> {label} <em style="color:#4b5563">({src})</em></div>', unsafe_allow_html=True)
+                    st.markdown("<br>", unsafe_allow_html=True)
+
                 st.markdown(f'<div style="color:#9ca3af;font-size:0.82rem;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.08em">Specific Trigger Breakdown</div>', unsafe_allow_html=True)
 
                 for cls in cls_list:
@@ -694,11 +858,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
     </div>
     """, unsafe_allow_html=True)
 
-    # ── session state ─────────────────────────────────────────────────────────
-    if "ms_results" not in st.session_state:
-        st.session_state.ms_results = []
-    if "ms_last_run" not in st.session_state:
-        st.session_state.ms_last_run = None
+    # ms_results and ms_last_run are initialised at app startup (top of file)
 
     def _fetch_finnhub_news(ticker: str, api_key: str, days_back: int = 2) -> tuple:
         """
@@ -998,6 +1158,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         if clear_results:
             st.session_state.ms_results = []
             st.session_state.ms_last_run = None
+            _save_json(MS_RESULTS_FILE, [])
             st.rerun()
 
         if run_scan and finnhub_key and gemini_key and selected_tickers:
@@ -1011,6 +1172,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                 for r in new_results:
                     existing[r["ticker"]] = r
                 st.session_state.ms_results = list(existing.values())
+                _save_json(MS_RESULTS_FILE, st.session_state.ms_results)
 
             st.success(f"Scan complete — {len(new_results)} ticker(s) added/updated. Table now shows {len(st.session_state.ms_results)} ticker(s) total.")
 
@@ -1058,6 +1220,29 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     "Direction":        st.column_config.TextColumn(width="small"),
                 }
             )
+
+            # ── Per-ticker delete ─────────────────────────────────────────────
+            with st.expander("🗑️ Remove a Ticker from Results", expanded=False):
+                ms_tickers = [r["ticker"].replace(" 📝", "") for r in st.session_state.ms_results]
+                del_ms_col1, del_ms_col2 = st.columns([2, 1])
+                with del_ms_col1:
+                    del_ms_ticker = st.selectbox(
+                        "Select ticker to remove",
+                        options=["— select —"] + ms_tickers,
+                        key="ms_del_ticker_sel"
+                    )
+                with del_ms_col2:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("🗑️ Remove", key="ms_del_ticker_btn",
+                                 disabled=del_ms_ticker == "— select —",
+                                 use_container_width=True):
+                        st.session_state.ms_results = [
+                            r for r in st.session_state.ms_results
+                            if r["ticker"].replace(" 📝", "") != del_ms_ticker
+                        ]
+                        _save_json(MS_RESULTS_FILE, st.session_state.ms_results)
+                        st.success(f"Removed {del_ms_ticker} from Morning Scan results.")
+                        st.rerun()
 
             # ── Per-ticker breakdown ──────────────────────────────────────────
             st.markdown("### 🔍 Catalyst Breakdown by Ticker")
