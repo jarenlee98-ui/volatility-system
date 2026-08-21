@@ -248,7 +248,10 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         else:
             net_text = f"Estimated Swing of {sign_min}{total_min:.1f}% to {sign_max}{total_max:.1f}%"
 
-        projected_open = current_price * (1 + (total_min / 100.0))
+        midpoint_pct = (total_min + total_max) / 2.0
+        projected_open      = current_price * (1 + (midpoint_pct / 100.0))
+        projected_open_low  = current_price * (1 + (total_min   / 100.0))
+        projected_open_high = current_price * (1 + (total_max   / 100.0))
 
         # Actionable playbook
         if dominant_direction == "bullish" and total_min >= 15:
@@ -269,7 +272,9 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
             "net_text": net_text,
             "total_min": total_min,
             "total_max": total_max,
-            "projected_open": projected_open,
+            "projected_open":      projected_open,
+            "projected_open_low":  projected_open_low,
+            "projected_open_high": projected_open_high,
             "dominant_direction": dominant_direction,
             "directive": directive,
             "playbook": playbook,
@@ -443,7 +448,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         with p1:
             st.markdown(f'<div class="mb-card"><div class="mb-label">Forecasted Swing</div><div style="color:{fc_color};font-size:1.6rem;font-weight:800;font-family:monospace">{fc["net_text"].split("of ")[-1]}</div></div>', unsafe_allow_html=True)
         with p2:
-            st.markdown(f'<div class="mb-card"><div class="mb-label">Projected Open</div><div style="color:#60a5fa;font-size:1.6rem;font-weight:800;font-family:monospace">${fc["projected_open"]:.2f}</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="mb-card"><div class="mb-label">Projected Open (Midpoint)</div><div style="color:#60a5fa;font-size:1.6rem;font-weight:800;font-family:monospace">${fc["projected_open"]:.2f}</div><div style="color:#6b7280;font-size:0.78rem;margin-top:4px">Floor ${fc["projected_open_low"]:.2f} · Ceiling ${fc["projected_open_high"]:.2f}</div></div>', unsafe_allow_html=True)
         with p3:
             st.markdown(f'<div class="mb-card"><div class="mb-label">Entry Price</div><div style="color:#9ca3af;font-size:1.6rem;font-weight:800;font-family:monospace">${price_disp:.2f}</div></div>', unsafe_allow_html=True)
 
@@ -541,32 +546,80 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
     if "ms_last_run" not in st.session_state:
         st.session_state.ms_last_run = None
 
-    def _fetch_finnhub_news(ticker: str, api_key: str, days_back: int = 2) -> list:
-        """Fetch recent company news from Finnhub for a ticker."""
+    def _fetch_finnhub_news(ticker: str, api_key: str, days_back: int = 2) -> tuple:
+        """
+        Fetch ticker-specific news headlines from SeekingAlpha (primary)
+        with Finnhub as fallback. Returns (articles_list, error_or_None).
+        """
+        import datetime as dt
+        cutoff = dt.datetime.utcnow() - dt.timedelta(days=days_back)
+
+        # ── Primary: SeekingAlpha news feed ───────────────────────────────────
         try:
-            import datetime as dt
-            today = dt.date.today()
+            sa_url = f"https://seekingalpha.com/api/sa/combined/{ticker.upper()}.json"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"https://seekingalpha.com/symbol/{ticker.upper()}/news",
+            }
+            resp = requests.get(sa_url, headers=headers, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                # SA combined feed has 'news' and 'analysis' keys
+                raw_items = data.get("news", []) + data.get("analysis", [])
+                articles = []
+                for item in raw_items:
+                    title    = item.get("title", "") or item.get("headline", "")
+                    summary  = item.get("summary", "") or item.get("content", "")
+                    pub_date = item.get("publish_on") or item.get("publishOn") or ""
+                    source   = item.get("author", {}).get("nick", "SeekingAlpha") if isinstance(item.get("author"), dict) else "SeekingAlpha"
+                    if not title:
+                        continue
+                    articles.append({
+                        "headline": title,
+                        "summary":  summary[:300],
+                        "source":   source,
+                        "datetime": 0,
+                        "text":     f"{title}. {summary[:300]}".strip()
+                    })
+                if articles:
+                    return articles[:5], None
+        except Exception:
+            pass  # fall through to Finnhub
+
+        # ── Fallback: Finnhub ─────────────────────────────────────────────────
+        try:
+            today     = dt.date.today()
             from_date = (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
-            to_date = today.strftime("%Y-%m-%d")
+            to_date   = today.strftime("%Y-%m-%d")
             resp = requests.get(
                 "https://finnhub.io/api/v1/company-news",
                 params={"symbol": ticker, "from": from_date, "to": to_date, "token": api_key},
                 timeout=10
             )
             resp.raise_for_status()
-            articles = resp.json()
-            # Return top 5 most recent, combining headline + summary
-            articles = sorted(articles, key=lambda x: x.get("datetime", 0), reverse=True)[:5]
-            return [
+            raw = resp.json()
+            # Filter to ticker-relevant articles only (exclude generic market articles)
+            ticker_upper = ticker.upper()
+            relevant = [
+                a for a in raw
+                if ticker_upper in (a.get("headline", "") + a.get("summary", "")).upper()
+                or ticker_upper in a.get("related", "").upper()
+            ]
+            # Fall back to all if filter removes everything
+            pool = relevant if len(relevant) >= 2 else raw
+            pool = sorted(pool, key=lambda x: x.get("datetime", 0), reverse=True)[:5]
+            articles = [
                 {
                     "headline": a.get("headline", ""),
-                    "summary": a.get("summary", ""),
-                    "source": a.get("source", ""),
+                    "summary":  a.get("summary", ""),
+                    "source":   a.get("source", "Finnhub"),
                     "datetime": a.get("datetime", 0),
-                    "text": f"{a.get('headline', '')}. {a.get('summary', '')}".strip()
+                    "text":     f"{a.get('headline', '')}. {a.get('summary', '')}".strip()
                 }
-                for a in articles if a.get("headline")
-            ], None
+                for a in pool if a.get("headline")
+            ]
+            return articles, None
         except Exception as e:
             return [], str(e)
 
@@ -740,7 +793,9 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                 "net_text": net_text,
                 "total_min": total_min,
                 "total_max": total_max,
-                "projected_open": price * (1 + total_min / 100.0) if price > 0 else 0.0,
+                "projected_open":      price * (1 + ((total_min + total_max) / 2.0) / 100.0) if price > 0 else 0.0,
+                "projected_open_low":  price * (1 + total_min / 100.0) if price > 0 else 0.0,
+                "projected_open_high": price * (1 + total_max / 100.0) if price > 0 else 0.0,
                 "dominant_direction": dominant_direction,
             }
             results.append(result)
@@ -828,7 +883,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         "Ticker": r["ticker"],
                         "Aftermarket Price": f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—",
                         "Forecast Swing": f"{color} {fc['net_text']}",
-                        "Projected Open": f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—",
+                        "Projected Open": f"${fc['projected_open']:.2f} (${fc['projected_open_low']:.2f}–${fc['projected_open_high']:.2f})" if fc["projected_open"] else "—",
                         "Catalysts": cls_tags,
                         "Direction": fc["dominant_direction"].capitalize(),
                     })
@@ -860,7 +915,8 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     col_a, col_b, col_c = st.columns(3)
                     col_a.metric("Aftermarket Price", f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—")
                     col_b.metric("Forecast Swing", fc["net_text"])
-                    col_c.metric("Projected Open", f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—")
+                    col_c.metric("Projected Open (Mid)", f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—",
+                                 delta=f"Floor ${fc['projected_open_low']:.2f} · Ceil ${fc['projected_open_high']:.2f}")
 
                     st.markdown("**Catalyst Classification Breakdown**")
                     cls_rows = []
