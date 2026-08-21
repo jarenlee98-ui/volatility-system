@@ -157,7 +157,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
         try:
             resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=30
@@ -695,7 +695,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
                 try:
                     resp = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={gemini_key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}",
                         headers={"Content-Type": "application/json"},
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=30
@@ -1227,10 +1227,10 @@ Rules:
                 ".streamlit/secrets.toml or as an environment variable."
             )
 
-        # Gemini REST endpoint — gemini-3.7-flash is the current stable Flash model
+        # Gemini REST endpoint — gemini-1.5-flash is the current stable Flash model
         gemini_url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-3.7-flash:generateContent?key={api_key}"
+            f"gemini-1.5-flash:generateContent?key={api_key}"
         )
         resp = requests.post(
             gemini_url,
