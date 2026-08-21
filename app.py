@@ -89,9 +89,8 @@ This system implements a transition from continuous mathematical volatility mode
 st.title("Event-Driven Volatility Correlation & Predictive Alert System")
 st.caption("Discrete Event Classification & Quantitative Arbitrage Matching Engine")
 
-tab_predict, tab_morning, tab_schedule, tab_database, tab_memory = st.tabs([
-    "🎯 Real-Time Prediction Engine",
-    "🌅 Morning Scan",
+tab_predict, tab_schedule, tab_database, tab_memory = st.tabs([
+    "🎯 Prediction Engine",
     "📅 Scheduler & Watchlist", 
     "🗄️ Correlation Database Editor",
     "🧠 Memory Bank"
@@ -158,7 +157,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
         try:
             resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={api_key}",
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=30
@@ -279,36 +278,110 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
     # ── Input section ──────────────────────────────────────────────────────────
     st.markdown('<div style="display:flex;align-items:center;margin-bottom:10px"><span class="mb-step-num" style="background:#60a5fa">1</span><span style="color:#60a5fa;font-weight:700;font-size:1rem;">Live News Drop</span></div>', unsafe_allow_html=True)
 
+    def _fetch_price_for_ticker(ticker: str) -> float:
+        """Fetch live aftermarket / pre-market price via yfinance."""
+        if not YFINANCE_AVAILABLE:
+            return 0.0
+        try:
+            stock = yf.Ticker(ticker)
+            price = (
+                stock.fast_info.get("lastPrice")
+                or stock.fast_info.get("previousClose")
+                or 0.0
+            )
+            return float(price)
+        except Exception:
+            return 0.0
+
+    def _fetch_url_content(url: str) -> str:
+        """
+        Fetches article text from a URL (SeekingAlpha, Investing.com, etc).
+        Returns cleaned body text suitable for Gemini classification.
+        """
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            html = resp.text
+
+            # Strip scripts, styles, nav
+            import re as _re
+            html = _re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=_re.DOTALL | _re.IGNORECASE)
+            html = _re.sub(r"<style[^>]*>.*?</style>",  " ", html, flags=_re.DOTALL | _re.IGNORECASE)
+            html = _re.sub(r"<nav[^>]*>.*?</nav>",      " ", html, flags=_re.DOTALL | _re.IGNORECASE)
+            html = _re.sub(r"<footer[^>]*>.*?</footer>","", html, flags=_re.DOTALL | _re.IGNORECASE)
+            # Strip remaining tags
+            text = _re.sub(r"<[^>]+>", " ", html)
+            # Collapse whitespace
+            text = _re.sub(r"\s+", " ", text).strip()
+            # Trim to ~4000 chars to stay within Gemini context
+            return text[:4000]
+        except Exception as e:
+            return f"URL_FETCH_ERROR: {e}"
+
     col1, col2 = st.columns([2, 1])
     with col1:
+        news_url_input = st.text_input(
+            "Article URL (SeekingAlpha, Investing.com, etc.)",
+            placeholder="https://seekingalpha.com/article/... or https://www.investing.com/news/...",
+            key="pe_url_input"
+        )
         raw_news = st.text_area(
-            "Raw Headline / Press Release",
+            "Or paste raw news text directly",
             placeholder="Paste the full earnings release, press release, or news headline here...",
-            height=130,
-            label_visibility="collapsed",
+            height=100,
             key="pe_news_input"
         )
     with col2:
         pe_ticker_input = st.text_input("Ticker", placeholder="e.g. NVDA", key="pe_ticker_field").strip().upper()
-        ref_price = st.number_input("Current / Pre-Market Price ($)", value=0.0, step=1.0, format="%.2f", key="pe_price_field")
+        # Auto-fetch price when ticker is entered
+        auto_price = 0.0
+        if pe_ticker_input:
+            auto_price = _fetch_price_for_ticker(pe_ticker_input)
+            if auto_price > 0:
+                st.markdown(f'<div class="mb-card"><div class="mb-label">Live Aftermarket Price</div><div style="color:#34d399;font-size:1.4rem;font-weight:800;font-family:monospace">${auto_price:.2f}</div></div>', unsafe_allow_html=True)
+            else:
+                st.warning("Price unavailable — enter manually")
+                auto_price = st.number_input("Manual Price ($)", value=0.0, step=1.0, format="%.2f", key="pe_price_manual")
         predict_btn = st.button("🎯 Analyse Catalysts", type="primary", use_container_width=True, key="pe_analyse_btn")
 
     if predict_btn:
         st.session_state.pe_classifications = None
         st.session_state.pe_forecast = None
         st.session_state.pe_logged = False
-        if not raw_news:
-            st.error("Please paste news text first.")
-        elif not pe_ticker_input:
+        if not pe_ticker_input:
             st.error("Please enter a ticker symbol.")
         else:
-            st.session_state.pe_ticker = pe_ticker_input
-            st.session_state.pe_price = ref_price
-            with st.spinner("Gemini is reading the news and identifying all catalysts…"):
-                cls_list = _gemini_classify_realtime(pe_ticker_input, raw_news)
-                if cls_list:
-                    st.session_state.pe_classifications = cls_list
-                    st.session_state.pe_forecast = _build_forecast(cls_list, ref_price)
+            # Resolve news text — URL takes priority over pasted text
+            resolved_news = ""
+            if news_url_input.strip().startswith("http"):
+                with st.spinner(f"Fetching article from {news_url_input[:60]}…"):
+                    resolved_news = _fetch_url_content(news_url_input.strip())
+                if resolved_news.startswith("URL_FETCH_ERROR"):
+                    st.error(f"Could not fetch URL: {resolved_news}")
+                    resolved_news = ""
+                elif len(resolved_news) < 80:
+                    st.warning("URL returned very little text — falling back to pasted text.")
+                    resolved_news = raw_news
+                else:
+                    st.success(f"Fetched {len(resolved_news):,} characters from article.")
+            else:
+                resolved_news = raw_news
+
+            if not resolved_news.strip():
+                st.error("Please paste news text or enter a valid article URL.")
+            else:
+                st.session_state.pe_ticker = pe_ticker_input
+                st.session_state.pe_price = auto_price
+                with st.spinner("Gemini is reading the news and identifying all catalysts…"):
+                    cls_list = _gemini_classify_realtime(pe_ticker_input, resolved_news)
+                    if cls_list:
+                        st.session_state.pe_classifications = cls_list
+                        st.session_state.pe_forecast = _build_forecast(cls_list, auto_price)
 
     # ── Results ────────────────────────────────────────────────────────────────
     if st.session_state.pe_classifications and st.session_state.pe_forecast:
@@ -453,16 +526,13 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         if st.session_state.pe_logged:
             st.info("Records logged. Paste a new news drop above to run another prediction.")
 
-# ==========================================
-# TAB 2: MORNING SCAN
-# ==========================================
-with tab_morning:
+    # ── Morning Scan section ───────────────────────────────────────────────────
+    st.markdown('<div class="mb-divider"></div>', unsafe_allow_html=True)
     st.markdown("""
-    <div style='margin-bottom:6px'>
-        <span style='color:#34d399;font-size:1.45rem;font-weight:800;letter-spacing:-0.01em;'>🌅 Morning Scan</span>
-        <span style='color:#6b7280;font-size:0.88rem;margin-left:10px;'>Auto-pulls overnight news for every watchlist ticker → Gemini classifies catalysts → forecasts swing from DB</span>
+    <div style='margin-bottom:12px'>
+        <span style='color:#34d399;font-size:1.1rem;font-weight:800;'>🌅 Morning Scan</span>
+        <span style='color:#6b7280;font-size:0.88rem;margin-left:10px;'>Select tickers → auto-pull overnight news → classify catalysts → forecast swing</span>
     </div>
-    <hr style='border-color:#1f2937;margin-bottom:20px;'>
     """, unsafe_allow_html=True)
 
     # ── session state ─────────────────────────────────────────────────────────
@@ -509,37 +579,6 @@ with tab_morning:
         except Exception:
             return 0.0
 
-    def _check_technical_setup(ticker: str, volume_multiple: float = 2.0) -> dict:
-        """
-        Rule-based check for a Structural-Short-Squeeze-shaped technical setup:
-        volume spike + price above SMA20/50/100. No LLM call — pure market data,
-        cheap enough to run on every scan.
-        """
-        try:
-            hist = yf.Ticker(ticker).history(period="6mo")
-            if len(hist) < 100:
-                return {"hit": False, "note": "insufficient history"}
-
-            hist["avg_vol_20d"] = hist["Volume"].rolling(20).mean()
-            hist["sma20"] = hist["Close"].rolling(20).mean()
-            hist["sma50"] = hist["Close"].rolling(50).mean()
-            hist["sma100"] = hist["Close"].rolling(100).mean()
-            latest = hist.iloc[-1]
-
-            volume_spike = latest["Volume"] > volume_multiple * latest["avg_vol_20d"]
-            breakout = latest["Close"] > latest["sma20"] > latest["sma50"] > latest["sma100"]
-            hit = bool(volume_spike and breakout)
-
-            return {
-                "hit": hit,
-                "summary": (
-                    f"Vol {latest['Volume']:,.0f} vs 20d avg {latest['avg_vol_20d']:,.0f} · "
-                    f"Close {latest['Close']:.2f} above SMA20/50/100"
-                ) if hit else None,
-            }
-        except Exception as e:
-            return {"hit": False, "error": str(e)}
-
     def _run_morning_scan(watchlist: list, finnhub_key: str, gemini_key: str) -> list:
         """
         Full pipeline: for each ticker, fetch news → classify → forecast.
@@ -554,15 +593,11 @@ with tab_morning:
                 "news_items": [],
                 "all_classifications": [],
                 "forecast": None,
-                "technical": None,
                 "error": None
             }
 
             # Step 1 — aftermarket price
             result["aftermarket_price"] = _fetch_aftermarket_price(ticker)
-
-            # Step 1.5 — technical setup (volume + moving-average breakout, no LLM)
-            result["technical"] = _check_technical_setup(ticker)
 
             # Step 2 — news
             news_items, fetch_err = _fetch_finnhub_news(ticker, finnhub_key)
@@ -607,7 +642,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
                 try:
                     resp = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={gemini_key}",
                         headers={"Content-Type": "application/json"},
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=30
@@ -781,7 +816,6 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         "Projected Open": "—",
                         "Catalysts": "—",
                         "Direction": "—",
-                        "Technical Setup": "🎯 Breakout" if (r.get("technical") or {}).get("hit") else "—",
                     })
                 else:
                     fc = r["forecast"]
@@ -797,7 +831,6 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         "Projected Open": f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—",
                         "Catalysts": cls_tags,
                         "Direction": fc["dominant_direction"].capitalize(),
-                        "Technical Setup": "🎯 Breakout" if (r.get("technical") or {}).get("hit") else "—",
                     })
 
             st.dataframe(
@@ -811,7 +844,6 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     "Projected Open":   st.column_config.TextColumn(width="small"),
                     "Catalysts":        st.column_config.TextColumn(width="large"),
                     "Direction":        st.column_config.TextColumn(width="small"),
-                    "Technical Setup":  st.column_config.TextColumn(width="small"),
                 }
             )
 
@@ -829,10 +861,6 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                     col_a.metric("Aftermarket Price", f"${r['aftermarket_price']:.2f}" if r["aftermarket_price"] else "—")
                     col_b.metric("Forecast Swing", fc["net_text"])
                     col_c.metric("Projected Open", f"${fc['projected_open']:.2f}" if fc["projected_open"] else "—")
-
-                    tech = r.get("technical") or {}
-                    if tech.get("hit"):
-                        st.markdown(f"🎯 **Technical Setup detected:** {tech['summary']}")
 
                     st.markdown("**Catalyst Classification Breakdown**")
                     cls_rows = []
@@ -854,9 +882,8 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
                         ts = _dt2.datetime.fromtimestamp(article["datetime"]).strftime("%Y-%m-%d %H:%M") if article.get("datetime") else ""
                         st.markdown(f"- **{article['headline']}** _{article.get('source','')} {ts}_")
 
-
 # ==========================================
-# TAB 3: SCHEDULER & WATCHLIST
+# TAB 2: SCHEDULER & WATCHLIST
 # ==========================================
 with tab_schedule:
     st.subheader("Event Scheduler & Calendar Automation (Phase 1)")
@@ -1144,10 +1171,10 @@ Rules:
                 ".streamlit/secrets.toml or as an environment variable."
             )
 
-        # Gemini REST endpoint — gemini-1.5-flash is the current stable Flash model
+        # Gemini REST endpoint — gemini-3.7-flash is the current stable Flash model
         gemini_url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-1.5-flash:generateContent?key={api_key}"
+            f"gemini-3.7-flash:generateContent?key={api_key}"
         )
         resp = requests.post(
             gemini_url,
