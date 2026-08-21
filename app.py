@@ -157,7 +157,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
         try:
             resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}",
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=30
@@ -554,36 +554,38 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
         import datetime as dt
         cutoff = dt.datetime.utcnow() - dt.timedelta(days=days_back)
 
-        # ── Primary: SeekingAlpha news feed ───────────────────────────────────
+        # ── Primary: SeekingAlpha news HTML page ─────────────────────────────
         try:
-            sa_url = f"https://seekingalpha.com/api/sa/combined/{ticker.upper()}.json"
+            sa_url = f"https://seekingalpha.com/symbol/{ticker.upper()}/news"
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Referer": f"https://seekingalpha.com/symbol/{ticker.upper()}/news",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Referer": "https://seekingalpha.com/",
             }
             resp = requests.get(sa_url, headers=headers, timeout=12)
-            if resp.status_code == 200:
-                data = resp.json()
-                # SA combined feed has 'news' and 'analysis' keys
-                raw_items = data.get("news", []) + data.get("analysis", [])
-                articles = []
-                for item in raw_items:
-                    title    = item.get("title", "") or item.get("headline", "")
-                    summary  = item.get("summary", "") or item.get("content", "")
-                    pub_date = item.get("publish_on") or item.get("publishOn") or ""
-                    source   = item.get("author", {}).get("nick", "SeekingAlpha") if isinstance(item.get("author"), dict) else "SeekingAlpha"
-                    if not title:
-                        continue
-                    articles.append({
-                        "headline": title,
-                        "summary":  summary[:300],
-                        "source":   source,
-                        "datetime": 0,
-                        "text":     f"{title}. {summary[:300]}".strip()
-                    })
-                if articles:
-                    return articles[:5], None
+            if resp.status_code == 200 and "seekingalpha" in resp.url:
+                import re as _re
+                html = resp.text
+                # Extract article titles from SA's JSON state blob embedded in the HTML
+                # SA embeds a __NEXT_DATA__ JSON with all article metadata
+                match = _re.search(r'"title"\s*:\s*"([^"]{15,200})"', html)
+                titles = _re.findall(r'"title"\s*:\s*"([^"]{15,200})"', html)
+                # Filter to meaningful headlines (not nav/UI strings)
+                skip_words = {"seekingalpha", "sign in", "portfolio", "subscribe", "markets", "symbol"}
+                headlines = [
+                    t for t in titles
+                    if not any(s in t.lower() for s in skip_words)
+                    and ticker.upper() in t.upper() or any(
+                        kw in t.lower() for kw in ["earnings", "revenue", "deal", "analyst", "upgrade", "downgrade", "buy", "sell", "q1", "q2", "q3", "q4", "guidance", "beats", "misses", "raises"]
+                    )
+                ][:5]
+                if len(headlines) >= 2:
+                    articles = [
+                        {"headline": h, "summary": "", "source": "SeekingAlpha", "datetime": 0, "text": h}
+                        for h in headlines
+                    ]
+                    return articles, None
         except Exception:
             pass  # fall through to Finnhub
 
@@ -695,7 +697,7 @@ Rules: 1-5 catalysts only. Each must have a unique classification. weight_pct mu
 
                 try:
                     resp = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={gemini_key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={gemini_key}",
                         headers={"Content-Type": "application/json"},
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=30
@@ -1227,10 +1229,10 @@ Rules:
                 ".streamlit/secrets.toml or as an environment variable."
             )
 
-        # Gemini REST endpoint — gemini-3.7-flash is the current stable Flash model
+        # Gemini REST endpoint — gemini-2.5-flash-lite is the current stable Flash model
         gemini_url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-3.7-flash:generateContent?key={api_key}"
+            f"gemini-2.5-flash-lite:generateContent?key={api_key}"
         )
         resp = requests.post(
             gemini_url,
