@@ -1175,10 +1175,95 @@ with tab_schedule:
 # ==========================================
 with tab_database:
     st.subheader("🗄️ Historical Correlation Database")
-    st.write("This database acts as the system's baseline ground-truth. You can view, add, or edit historical event-driven triggers.")
+    st.write("This database acts as the system's baseline ground-truth. You can view, add, edit, or delete historical event-driven triggers.")
 
-    records_list = [{"Ticker": r.ticker, "Event Type": r.event_type, "Trigger Metric": r.trigger_metric, "Resulting Swing": r.resulting_swing, "Classification": r.classification, "Swing Value (%)": r.swing_value} for r in system.db.records]
-    st.dataframe(pd.DataFrame(records_list), use_container_width=True, hide_index=True)
+    records = system.db.records
+
+    if not records:
+        st.info("No records in the database yet. Use the Memory Bank tab to add entries.")
+    else:
+        # ── Delete by Ticker ───────────────────────────────────────────────────
+        with st.expander("🗑️ Delete by Ticker", expanded=False):
+            all_tickers = sorted(set(r.ticker for r in records))
+            del_ticker = st.selectbox("Select ticker to delete ALL records for", options=["— select —"] + all_tickers, key="del_ticker_select")
+            ticker_count = sum(1 for r in records if r.ticker == del_ticker) if del_ticker != "— select —" else 0
+            col_del1, col_del2 = st.columns([1, 3])
+            with col_del1:
+                del_ticker_btn = st.button(
+                    f"🗑️ Delete all {ticker_count} record(s) for {del_ticker}" if del_ticker != "— select —" else "Select a ticker first",
+                    type="secondary",
+                    disabled=del_ticker == "— select —",
+                    key="del_ticker_btn",
+                    use_container_width=True
+                )
+            if del_ticker_btn and del_ticker != "— select —":
+                system.db.records = [r for r in system.db.records if r.ticker != del_ticker]
+                system.db.save()
+                st.success(f"✅ Deleted {ticker_count} record(s) for {del_ticker}.")
+                st.rerun()
+
+        # ── Per-row delete table ───────────────────────────────────────────────
+        st.markdown("**Select rows to delete:**")
+
+        # Build display df with index for deletion
+        rows_display = []
+        for i, r in enumerate(records):
+            rows_display.append({
+                "#":                i,
+                "Ticker":           r.ticker,
+                "Event Type":       r.event_type,
+                "Classification":   r.classification,
+                "Resulting Swing":  r.resulting_swing,
+                "Swing Value (%)":  r.swing_value,
+                "Trigger Metric":   r.trigger_metric,
+            })
+
+        df_display = pd.DataFrame(rows_display)
+
+        edited = st.data_editor(
+            df_display.drop(columns=["#"]),
+            use_container_width=True,
+            hide_index=False,
+            num_rows="fixed",
+            column_config={
+                "Ticker":          st.column_config.TextColumn(width="small"),
+                "Event Type":      st.column_config.TextColumn(width="medium"),
+                "Classification":  st.column_config.TextColumn(width="medium"),
+                "Resulting Swing": st.column_config.TextColumn(width="medium"),
+                "Swing Value (%)": st.column_config.NumberColumn(width="small", format="%.2f"),
+                "Trigger Metric":  st.column_config.TextColumn(width="large"),
+            },
+            key="db_editor"
+        )
+
+        # Row index multiselect for deletion
+        row_indices = st.multiselect(
+            "Select row numbers to delete (use the # index on the left)",
+            options=list(range(len(records))),
+            format_func=lambda i: f"Row {i} — {records[i].ticker} · {records[i].classification} · {records[i].resulting_swing}",
+            key="del_row_select"
+        )
+
+        col_r1, col_r2 = st.columns([1, 3])
+        with col_r1:
+            del_rows_btn = st.button(
+                f"🗑️ Delete {len(row_indices)} selected row(s)" if row_indices else "Select rows above",
+                type="secondary",
+                disabled=len(row_indices) == 0,
+                key="del_rows_btn",
+                use_container_width=True
+            )
+        with col_r2:
+            if row_indices:
+                previews = [f"{records[i].ticker} · {records[i].classification}" for i in row_indices]
+                st.caption("Will delete: " + " | ".join(previews))
+
+        if del_rows_btn and row_indices:
+            indices_to_delete = set(row_indices)
+            system.db.records = [r for i, r in enumerate(system.db.records) if i not in indices_to_delete]
+            system.db.save()
+            st.success(f"✅ Deleted {len(indices_to_delete)} record(s).")
+            st.rerun()
 
     st.markdown("---")
     st.info(
