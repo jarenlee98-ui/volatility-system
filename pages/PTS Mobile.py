@@ -4,6 +4,7 @@ from psycopg2.extras import RealDictCursor
 import os
 import yfinance as yf
 import pandas as pd
+from datetime import datetime
 
 # Mobile-friendly configuration
 st.set_page_config(page_title="PTS Mobile", page_icon="⚡", layout="centered")
@@ -57,43 +58,54 @@ def update_remarks(ticker, new_remark):
         conn.rollback()
         st.error(f"Failed to save remark: {e}")
 
-# 3. Live Aftermarket Data Overlay
+# 3. Live Aftermarket Data Overlay (On-Demand Snapshot)
 @st.cache_data(ttl=15)
 def fetch_live_market_data(ticker_list):
-    """Fetches up-to-the-second aftermarket prices and fills missing ranges for new stocks."""
+    """Fetches up-to-the-minute live aftermarket prices and 5-day ranges."""
     live_dict = {}
+    timestamp = datetime.now().strftime("%I:%M:%S %p") # Captures exact time of refresh
     if not ticker_list: 
-        return live_dict
+        return live_dict, timestamp
     try:
-        df = yf.download(ticker_list, period="5d", prepost=True, progress=False)
-        if df.empty: 
-            return live_dict
+        # 5-day daily data for weekly boundaries
+        df_5d = yf.download(ticker_list, period="5d", progress=False)
+        
+        # 2-day 1-minute data ensures we capture late aftermarket even past midnight
+        df_live = yf.download(ticker_list, period="2d", interval="1m", prepost=True, progress=False)
+        
+        if df_live.empty or df_5d.empty: 
+            return live_dict, timestamp
             
-        if isinstance(df.columns, pd.MultiIndex):
-            for t in ticker_list:
-                if t in df['Close'].columns:
-                    try:
-                        live_dict[t] = {
-                            "price": float(df['Close'][t].dropna().iloc[-1]),
-                            "d_high": float(df['High'][t].dropna().iloc[-1]),
-                            "d_low": float(df['Low'][t].dropna().iloc[-1]),
-                            "w_high": float(df['High'][t].dropna().max()),
-                            "w_low": float(df['Low'][t].dropna().min())
-                        }
-                    except Exception:
-                        continue
-        else:
-            t = ticker_list[0]
-            live_dict[t] = {
-                "price": float(df['Close'].dropna().iloc[-1]),
-                "d_high": float(df['High'].dropna().iloc[-1]),
-                "d_low": float(df['Low'].dropna().iloc[-1]),
-                "w_high": float(df['High'].dropna().max()),
-                "w_low": float(df['Low'].dropna().min())
-            }
+        is_multi = isinstance(df_live.columns, pd.MultiIndex)
+        
+        for t in ticker_list:
+            try:
+                if is_multi:
+                    if t not in df_live['Close'].columns: continue
+                    live_px = float(df_live['Close'][t].dropna().iloc[-1])
+                    d_high = float(df_live['High'][t].dropna().max())
+                    d_low = float(df_live['Low'][t].dropna().min())
+                    w_high = float(df_5d['High'][t].dropna().max())
+                    w_low = float(df_5d['Low'][t].dropna().min())
+                else:
+                    live_px = float(df_live['Close'].dropna().iloc[-1])
+                    d_high = float(df_live['High'].dropna().max())
+                    d_low = float(df_live['Low'].dropna().min())
+                    w_high = float(df_5d['High'].dropna().max())
+                    w_low = float(df_5d['Low'].dropna().min())
+                    
+                live_dict[t] = {
+                    "price": live_px,
+                    "d_high": max(d_high, live_px),
+                    "d_low": min(d_low, live_px),
+                    "w_high": max(w_high, live_px),
+                    "w_low": min(w_low, live_px)
+                }
+            except Exception:
+                continue
     except Exception:
         pass
-    return live_dict
+    return live_dict, timestamp
 
 data = fetch_worksheet()
 
@@ -103,7 +115,9 @@ if not data:
 
 # Ordering Logic
 all_tickers = [row['ticker'] for row in data]
-live_market_data = fetch_live_market_data(all_tickers)
+live_market_data, last_updated = fetch_live_market_data(all_tickers)
+
+st.caption(f"🕒 **Live Market Snapshot:** {last_updated}")
 
 if 'custom_ticker_order' not in st.session_state:
     st.session_state.custom_ticker_order = all_tickers
@@ -135,7 +149,7 @@ for row in sorted_data:
     ticker = row['ticker']
     live_info = live_market_data.get(ticker, {})
     
-    # Prioritize Live Aftermarket Price over Database Price
+    # Prioritize Live 1-Minute Aftermarket Price over Database Price
     live_px = live_info.get("price")
     db_px = safe_float(row['close_price'])
     final_px = live_px if live_px is not None else db_px
@@ -152,7 +166,7 @@ for row in sorted_data:
     elif directive in ["TRIM", "SUSPENDED", "STOP_BUY"]: d_color = "#ef4444"
     elif directive == "RUNNER": d_color = "#8b5cf6"
 
-    # Prioritize Database GARCH Bounds, fallback to live market high/low for SPCX
+    # Prioritize Database GARCH Bounds, fallback to live market bounds for SPCX
     dl = safe_float(row['etr_day_low'])
     if dl is not None and dl > 0:
         d_low = f"${dl:.1f}"
