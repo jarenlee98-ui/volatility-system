@@ -2,6 +2,8 @@ import streamlit as st
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import yfinance as yf
+import pandas as pd
 
 # Mobile-friendly configuration
 st.set_page_config(page_title="PTS Mobile", page_icon="⚡", layout="centered")
@@ -55,19 +57,57 @@ def update_remarks(ticker, new_remark):
         conn.rollback()
         st.error(f"Failed to save remark: {e}")
 
+# 3. Live Aftermarket Data Overlay
+@st.cache_data(ttl=15)
+def fetch_live_market_data(ticker_list):
+    """Fetches up-to-the-second aftermarket prices and fills missing ranges for new stocks."""
+    live_dict = {}
+    if not ticker_list: 
+        return live_dict
+    try:
+        df = yf.download(ticker_list, period="5d", prepost=True, progress=False)
+        if df.empty: 
+            return live_dict
+            
+        if isinstance(df.columns, pd.MultiIndex):
+            for t in ticker_list:
+                if t in df['Close'].columns:
+                    try:
+                        live_dict[t] = {
+                            "price": float(df['Close'][t].dropna().iloc[-1]),
+                            "d_high": float(df['High'][t].dropna().iloc[-1]),
+                            "d_low": float(df['Low'][t].dropna().iloc[-1]),
+                            "w_high": float(df['High'][t].dropna().max()),
+                            "w_low": float(df['Low'][t].dropna().min())
+                        }
+                    except Exception:
+                        continue
+        else:
+            t = ticker_list[0]
+            live_dict[t] = {
+                "price": float(df['Close'].dropna().iloc[-1]),
+                "d_high": float(df['High'].dropna().iloc[-1]),
+                "d_low": float(df['Low'].dropna().iloc[-1]),
+                "w_high": float(df['High'].dropna().max()),
+                "w_low": float(df['Low'].dropna().min())
+            }
+    except Exception:
+        pass
+    return live_dict
+
 data = fetch_worksheet()
 
 if not data:
     st.info("No assets found in the database.")
     st.stop()
 
-# 3. Ticker Ordering Logic with Up/Down Controls
+# Ordering Logic
 all_tickers = [row['ticker'] for row in data]
+live_market_data = fetch_live_market_data(all_tickers)
 
 if 'custom_ticker_order' not in st.session_state:
     st.session_state.custom_ticker_order = all_tickers
 
-# Sync with DB tickers
 current_order = [t for t in st.session_state.custom_ticker_order if t in all_tickers]
 missing_tickers = [t for t in all_tickers if t not in current_order]
 st.session_state.custom_ticker_order = current_order + missing_tickers
@@ -76,24 +116,16 @@ def move_ticker(ticker, direction):
     idx = st.session_state.custom_ticker_order.index(ticker)
     if direction == "up" and idx > 0:
         st.session_state.custom_ticker_order[idx], st.session_state.custom_ticker_order[idx - 1] = (
-            st.session_state.custom_ticker_order[idx - 1],
-            st.session_state.custom_ticker_order[idx]
-        )
+            st.session_state.custom_ticker_order[idx - 1], st.session_state.custom_ticker_order[idx])
     elif direction == "down" and idx < len(st.session_state.custom_ticker_order) - 1:
         st.session_state.custom_ticker_order[idx], st.session_state.custom_ticker_order[idx + 1] = (
-            st.session_state.custom_ticker_order[idx + 1],
-            st.session_state.custom_ticker_order[idx]
-        )
+            st.session_state.custom_ticker_order[idx + 1], st.session_state.custom_ticker_order[idx])
     st.rerun()
 
-# --- SAFE PARSING HELPER: Prevents UI crash on empty metrics ---
 def safe_float(val, default=None):
-    if val is None or val == "":
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
+    if val is None or val == "": return default
+    try: return float(val)
+    except (ValueError, TypeError): return default
 
 # 4. Render Mobile Cards
 data_dict = {row['ticker']: row for row in data}
@@ -101,10 +133,13 @@ sorted_data = [data_dict[t] for t in st.session_state.custom_ticker_order if t i
 
 for row in sorted_data:
     ticker = row['ticker']
+    live_info = live_market_data.get(ticker, {})
     
-    # Safely parse numeric metrics
-    cp = safe_float(row['close_price'])
-    close_px = f"${cp:.2f}" if cp is not None else "—"
+    # Prioritize Live Aftermarket Price over Database Price
+    live_px = live_info.get("price")
+    db_px = safe_float(row['close_price'])
+    final_px = live_px if live_px is not None else db_px
+    close_px = f"${final_px:.2f}" if final_px is not None else "—"
     
     shares = row['shares_held'] or 0
     ac = safe_float(row['avg_cost'])
@@ -114,22 +149,22 @@ for row in sorted_data:
     directive = row['current_directive'] or "HOLD"
     d_color = "#f59e0b"
     if directive in ["BUY", "ACCUMULATE"]: d_color = "#10b981"
-    elif directive in ["TRIM", "SUSPENDED"]: d_color = "#ef4444"
+    elif directive in ["TRIM", "SUSPENDED", "STOP_BUY"]: d_color = "#ef4444"
     elif directive == "RUNNER": d_color = "#8b5cf6"
 
+    # Prioritize Database GARCH Bounds, fallback to live market high/low for SPCX
     dl = safe_float(row['etr_day_low'])
-    d_low = f"${dl:.1f}" if dl is not None else "—"
+    if dl is not None and dl > 0:
+        d_low = f"${dl:.1f}"
+        d_high = f"${safe_float(row['etr_day_high']):.1f}"
+        w_low = f"${safe_float(row['etr_week_low']):.1f}"
+        w_high = f"${safe_float(row['etr_week_high']):.1f}"
+    else:
+        d_low = f"${live_info.get('d_low'):.1f}" if live_info.get('d_low') else "—"
+        d_high = f"${live_info.get('d_high'):.1f}" if live_info.get('d_high') else "—"
+        w_low = f"${live_info.get('w_low'):.1f}" if live_info.get('w_low') else "—"
+        w_high = f"${live_info.get('w_high'):.1f}" if live_info.get('w_high') else "—"
     
-    dh = safe_float(row['etr_day_high'])
-    d_high = f"${dh:.1f}" if dh is not None else "—"
-    
-    wl = safe_float(row['etr_week_low'])
-    w_low = f"${wl:.1f}" if wl is not None else "—"
-    
-    wh = safe_float(row['etr_week_high'])
-    w_high = f"${wh:.1f}" if wh is not None else "—"
-    
-    # Handle New Stocks without GARCH History (e.g. SPCX)
     p_buy_val = safe_float(row['p_buy_mean'])
     is_calibrating = (p_buy_val is None or p_buy_val == 0.0)
     
@@ -143,7 +178,6 @@ for row in sorted_data:
         
     remarks_val = row['remarks'] if row['remarks'] else ""
 
-    # Card Top: Ticker, Position, Directive
     st.markdown(f"""
     <div style="background-color: #111827; border: 1px solid #1f293d; border-radius: 10px 10px 0 0; padding: 10px 12px 6px 12px; margin-top: 14px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -161,7 +195,6 @@ for row in sorted_data:
     </div>
     """, unsafe_allow_html=True)
 
-    # 4-Column Layout: Price | Entry Target | Remarks | Arrows
     c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.6, 0.4], gap="small")
     
     with c1:
@@ -199,6 +232,7 @@ for row in sorted_data:
         st.button("⬇", key=f"down_{ticker}", on_click=move_ticker, args=(ticker, "down"), use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
-if st.button("🔄 Refresh Data", use_container_width=True):
+if st.button("🔄 Refresh Live Data", use_container_width=True):
     fetch_worksheet.clear()
+    fetch_live_market_data.clear()
     st.rerun()
