@@ -86,15 +86,29 @@ def move_ticker(ticker, direction):
         )
     st.rerun()
 
+# --- SAFE PARSING HELPER: Prevents UI crash on empty metrics ---
+def safe_float(val, default=None):
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 # 4. Render Mobile Cards
 data_dict = {row['ticker']: row for row in data}
 sorted_data = [data_dict[t] for t in st.session_state.custom_ticker_order if t in data_dict]
 
 for row in sorted_data:
     ticker = row['ticker']
-    close_px = f"${float(row['close_price']):.2f}" if row['close_price'] is not None else "—"
+    
+    # Safely parse numeric metrics
+    cp = safe_float(row['close_price'])
+    close_px = f"${cp:.2f}" if cp is not None else "—"
+    
     shares = row['shares_held'] or 0
-    avg_cost = f"${float(row['avg_cost']):.2f}" if row['avg_cost'] is not None else "—"
+    ac = safe_float(row['avg_cost'])
+    avg_cost = f"${ac:.2f}" if ac is not None else "—"
     is_watch = shares == 0
 
     directive = row['current_directive'] or "HOLD"
@@ -103,20 +117,29 @@ for row in sorted_data:
     elif directive in ["TRIM", "SUSPENDED"]: d_color = "#ef4444"
     elif directive == "RUNNER": d_color = "#8b5cf6"
 
-    d_low = f"${float(row['etr_day_low']):.1f}" if row['etr_day_low'] is not None else "—"
-    d_high = f"${float(row['etr_day_high']):.1f}" if row['etr_day_high'] is not None else "—"
-    w_low = f"${float(row['etr_week_low']):.1f}" if row['etr_week_low'] is not None else "—"
-    w_high = f"${float(row['etr_week_high']):.1f}" if row['etr_week_high'] is not None else "—"
+    dl = safe_float(row['etr_day_low'])
+    d_low = f"${dl:.1f}" if dl is not None else "—"
     
-    # ── Handle New Stocks without GARCH History (e.g. SPCX) ──
-    is_calibrating = row['p_buy_mean'] is None or float(row['p_buy_mean']) == 0.0
+    dh = safe_float(row['etr_day_high'])
+    d_high = f"${dh:.1f}" if dh is not None else "—"
+    
+    wl = safe_float(row['etr_week_low'])
+    w_low = f"${wl:.1f}" if wl is not None else "—"
+    
+    wh = safe_float(row['etr_week_high'])
+    w_high = f"${wh:.1f}" if wh is not None else "—"
+    
+    # Handle New Stocks without GARCH History (e.g. SPCX)
+    p_buy_val = safe_float(row['p_buy_mean'])
+    is_calibrating = (p_buy_val is None or p_buy_val == 0.0)
+    
     if is_calibrating:
         p_buy = "—"
         underval_str = "Calibrating..."
     else:
-        p_buy = f"${float(row['p_buy_mean']):.2f}"
-        underval = float(row['underval_pct'] or 0) * 100
-        underval_str = f"↓ {abs(underval):.1f}%" if underval >= 0 else f"↑ {abs(underval):.1f}%"
+        p_buy = f"${p_buy_val:.2f}"
+        uv = safe_float(row['underval_pct'], 0.0) * 100
+        underval_str = f"↓ {abs(uv):.1f}%" if uv >= 0 else f"↑ {abs(uv):.1f}%"
         
     remarks_val = row['remarks'] if row['remarks'] else ""
 
@@ -172,9 +195,10 @@ for row in sorted_data:
             update_remarks(ticker, new_remark)
 
     with c4:
-        # Tiny arrow buttons stacked on the far right edge
         st.button("⬆", key=f"up_{ticker}", on_click=move_ticker, args=(ticker, "up"), use_container_width=True)
         st.button("⬇", key=f"down_{ticker}", on_click=move_ticker, args=(ticker, "down"), use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
-st.button("🔄 Refresh Data", use_container_width=True, on_click=fetch_worksheet.clear)
+if st.button("🔄 Refresh Data", use_container_width=True):
+    fetch_worksheet.clear()
+    st.rerun()
