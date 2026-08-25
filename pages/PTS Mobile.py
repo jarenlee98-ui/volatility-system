@@ -101,7 +101,7 @@ for row in sorted_data:
     d_color = "#f59e0b"
     if directive in ["BUY", "ACCUMULATE"]: d_color = "#10b981"
     elif directive in ["TRIM", "SUSPENDED"]: d_color = "#ef4444"
-    elif directive == "RUNNER"]: d_color = "#8b5cf6"
+    elif directive == "RUNNER": d_color = "#8b5cf6"
 
     d_low = f"${float(row['etr_day_low']):.1f}" if row['etr_day_low'] is not None else "—"
     d_high = f"${float(row['etr_day_high']):.1f}" if row['etr_day_high'] is not None else "—"
