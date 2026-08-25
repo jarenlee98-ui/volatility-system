@@ -107,13 +107,20 @@ for row in sorted_data:
     d_high = f"${float(row['etr_day_high']):.1f}" if row['etr_day_high'] is not None else "—"
     w_low = f"${float(row['etr_week_low']):.1f}" if row['etr_week_low'] is not None else "—"
     w_high = f"${float(row['etr_week_high']):.1f}" if row['etr_week_high'] is not None else "—"
-    p_buy = f"${float(row['p_buy_mean']):.2f}" if row['p_buy_mean'] is not None else "—"
     
-    underval = float(row['underval_pct'] or 0) * 100
-    underval_str = f"↓ {abs(underval):.1f}%" if underval >= 0 else f"↑ {abs(underval):.1f}%"
+    # ── Handle New Stocks without GARCH History (e.g. SPCX) ──
+    is_calibrating = row['p_buy_mean'] is None or float(row['p_buy_mean']) == 0.0
+    if is_calibrating:
+        p_buy = "—"
+        underval_str = "Calibrating..."
+    else:
+        p_buy = f"${float(row['p_buy_mean']):.2f}"
+        underval = float(row['underval_pct'] or 0) * 100
+        underval_str = f"↓ {abs(underval):.1f}%" if underval >= 0 else f"↑ {abs(underval):.1f}%"
+        
     remarks_val = row['remarks'] if row['remarks'] else ""
 
-    # Card Top: Ticker, Position, Directive, and Reorder Buttons
+    # Card Top: Ticker, Position, Directive
     st.markdown(f"""
     <div style="background-color: #111827; border: 1px solid #1f293d; border-radius: 10px 10px 0 0; padding: 10px 12px 6px 12px; margin-top: 14px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -131,8 +138,8 @@ for row in sorted_data:
     </div>
     """, unsafe_allow_html=True)
 
-    # 3-Column Layout: [Price (1.1x)] | [Entry Target (1.1x)] | [Remarks + Order (2x)]
-    c1, c2, c3 = st.columns([1.1, 1.1, 2.0], gap="small")
+    # 4-Column Layout: Price | Entry Target | Remarks | Arrows
+    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.6, 0.4], gap="small")
     
     with c1:
         st.markdown(f"""
@@ -164,12 +171,10 @@ for row in sorted_data:
         if new_remark != remarks_val:
             update_remarks(ticker, new_remark)
 
-        # Up/Down Reorder Buttons
-        btn_u, btn_d = st.columns(2)
-        with btn_u:
-            st.button("⬆ Move Up", key=f"up_{ticker}", on_click=move_ticker, args=(ticker, "up"), use_container_width=True)
-        with btn_d:
-            st.button("⬇ Move Down", key=f"down_{ticker}", on_click=move_ticker, args=(ticker, "down"), use_container_width=True)
+    with c4:
+        # Tiny arrow buttons stacked on the far right edge
+        st.button("⬆", key=f"up_{ticker}", on_click=move_ticker, args=(ticker, "up"), use_container_width=True)
+        st.button("⬇", key=f"down_{ticker}", on_click=move_ticker, args=(ticker, "down"), use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 st.button("🔄 Refresh Data", use_container_width=True, on_click=fetch_worksheet.clear)
