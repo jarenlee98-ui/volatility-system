@@ -108,6 +108,35 @@ def delete_ticker(ticker):
         conn.rollback()
         st.error(f"Failed to delete {ticker}: {e}")
 
+def add_ticker(ticker, shares_held=0, avg_cost=None, catalyst_tier="Standard", directive="HOLD"):
+    """Inserts a new ticker row into the database so it appears in the PTS worksheet."""
+    if not conn: return False
+    ticker = (ticker or "").strip().upper()
+    if not ticker: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ticker_states
+                    (ticker, shares_held, avg_cost, catalyst_tier, current_directive)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (ticker) DO NOTHING;
+                """,
+                (ticker, shares_held, avg_cost, catalyst_tier, directive)
+            )
+        conn.commit()
+        st.toast(f"✅ {ticker} added to worksheet.")
+
+        if "custom_ticker_order" in st.session_state and ticker not in st.session_state.custom_ticker_order:
+            st.session_state.custom_ticker_order.append(ticker)
+
+        fetch_worksheet.clear()
+        return True
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Failed to add {ticker}: {e}")
+        return False
+
 @st.cache_data(ttl=15)
 def fetch_live_market_data(ticker_list):
     live_dict = {}
@@ -173,6 +202,22 @@ st.markdown("""
     .metric-value-down { font-size: 1.8rem; font-weight: bold; color: #f87171; }
     .directive-card { background-color: #1e3a8a; padding: 15px; border-radius: 8px; border-left: 5px solid #3b82f6; margin-bottom: 15px; }
     .actionable-card { background-color: #064e3b; padding: 15px; border-radius: 8px; border-left: 5px solid #10b981; margin-bottom: 15px; }
+
+    /* Compact Up/Down/Delete controls on the PTS worksheet cards */
+    div[class*="st-key-pts_up_"],
+    div[class*="st-key-pts_down_"],
+    div[class*="st-key-pts_del_"] {
+        margin-bottom: 2px !important;
+    }
+    div[class*="st-key-pts_up_"] button,
+    div[class*="st-key-pts_down_"] button,
+    div[class*="st-key-pts_del_"] button {
+        height: 24px;
+        min-height: 0px;
+        padding: 0px 6px;
+        line-height: 1;
+        font-size: 11px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -331,6 +376,44 @@ with tab_pts:
                 fetch_worksheet.clear()
                 fetch_live_market_data.clear()
                 st.rerun()
+
+        st.markdown("---")
+        with st.expander("➕ Add Ticker", expanded=not pts_data):
+            existing_tickers = [row['ticker'] for row in pts_data] if pts_data else []
+
+            atc1, atc2, atc3 = st.columns([1.2, 1, 1])
+            with atc1:
+                new_ticker_symbol = st.text_input("Ticker", placeholder="e.g. NVDA", key="pts_add_ticker").strip().upper()
+            with atc2:
+                new_ticker_shares = st.number_input("Shares Held", min_value=0, value=0, step=1, key="pts_add_shares")
+            with atc3:
+                new_ticker_avg_cost = st.number_input("Avg Cost ($)", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="pts_add_avgcost")
+
+            atc4, atc5 = st.columns([1, 1])
+            with atc4:
+                new_ticker_tier = st.text_input("Catalyst Tier", value="Standard", key="pts_add_tier")
+            with atc5:
+                new_ticker_directive = st.selectbox(
+                    "Directive",
+                    ["HOLD", "BUY", "ACCUMULATE", "TRIM", "RUNNER", "STOP_BUY", "SUSPENDED"],
+                    key="pts_add_directive"
+                )
+
+            if st.button("➕ Add to Worksheet", type="primary", key="pts_add_btn"):
+                if not new_ticker_symbol:
+                    st.warning("Please enter a ticker symbol.")
+                elif new_ticker_symbol in existing_tickers:
+                    st.warning(f"{new_ticker_symbol} is already in the worksheet.")
+                else:
+                    added = add_ticker(
+                        new_ticker_symbol,
+                        shares_held=new_ticker_shares,
+                        avg_cost=new_ticker_avg_cost if new_ticker_avg_cost > 0 else None,
+                        catalyst_tier=new_ticker_tier.strip() or "Standard",
+                        directive=new_ticker_directive
+                    )
+                    if added:
+                        st.rerun()
 
 # ==========================================
 # TAB 2: SCHEDULER & WATCHLIST
